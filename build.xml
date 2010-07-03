@@ -163,9 +163,15 @@
 		</javac>
 
 		<!-- Copy web interface static files to the build dir -->
-		<copy todir="${build}/freenet/clients/http/staticfiles">
+		<!-- overwrite is only necessary for *.css really (see below) -->
+		<copy overwrite="true" todir="${build}/freenet/clients/http/staticfiles">
 			<fileset dir="${src}/freenet/clients/http/staticfiles"/>
 		</copy>
+		<!-- Add "?version=X" to any url() references in staticfiles -->
+		<!--<replaceregexp byline="true" match='(url\s*\(\s*"?[^"]+)("?\s*\))' replace="\1?version=${git.revision}\2">-->
+		<replaceregexp byline="true" match='(url\("?[^"]+)("?\))' replace="\1?version=${git.revision}\2">
+			<fileset includes="**/*.css" dir="${build}/freenet/clients/http/staticfiles" />
+		</replaceregexp>
 		<!-- Copy translation files to the build dir -->
 		<copy todir="${build}/freenet/l10n">
 			<fileset dir="${src}/freenet/l10n">

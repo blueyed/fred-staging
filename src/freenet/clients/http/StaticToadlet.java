@@ -10,12 +10,15 @@ import java.util.Date;
 
 import freenet.client.DefaultMIMETypes;
 import freenet.l10n.NodeL10n;
+import freenet.node.Version;
+import freenet.support.MultiValueTable;
+import freenet.support.TimeUtil;
 import freenet.support.api.Bucket;
 import freenet.support.api.HTTPRequest;
 
 /**
  * Static Toadlet.
- * Serve up static files
+ * Serve up static files, requested via "/static/".
  */
 public class StaticToadlet extends Toadlet {
 	StaticToadlet() {
@@ -29,8 +32,7 @@ public class StaticToadlet extends Toadlet {
 		String path = uri.getPath();
 		
 		if (!path.startsWith(ROOT_URL)) {
-			// we should never get any other path anyway
-			return;
+			return; // we should never get any other path anyway
 		}
 		try {
 			path = path.substring(ROOT_URL.length());
@@ -39,7 +41,7 @@ public class StaticToadlet extends Toadlet {
 			return;
 		}
 		
-		// be very strict about what characters we allow in the path, since
+		// be very strict about what characters we allow in the path
 		if (!path.matches("^[A-Za-z0-9\\._\\/\\-]*$") || (path.indexOf("..") != -1)) {
 			this.sendErrorPage(ctx, 404, l10n("pathNotFoundTitle"), l10n("pathInvalidChars"));
 			return;
@@ -60,11 +62,18 @@ public class StaticToadlet extends Toadlet {
 		}
 		strm.close();
 		os.close();
-		
+
 		URL url = getClass().getResource(ROOT_PATH+path);
 		Date mTime = getUrlMTime(url);
 		
-		ctx.sendReplyHeaders(200, "OK", null, DefaultMIMETypes.guessMIMEType(path, false), data.size(), mTime);
+		MultiValueTable<String, String> headers=new MultiValueTable<String, String>();
+		if (request.getParam("version").equals(Version.cvsRevision())) {
+			// Add Expires header with date in the far future: this resource can
+			// be cached "forever".
+			headers.put("expires", "MAX");
+		}
+
+		ctx.sendReplyHeaders(200, "OK", headers, DefaultMIMETypes.guessMIMEType(path, false), data.size(), mTime);
 
 		ctx.writeData(data);
 		data.free();

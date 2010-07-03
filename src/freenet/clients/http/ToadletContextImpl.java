@@ -168,7 +168,7 @@ public class ToadletContextImpl implements ToadletContext {
 			if (mvt == null) {
 				mvt = new MultiValueTable<String,String>();
 			}
-			mvt.put("cache-control:", "no-cache=\"set-cookie\"");
+			mvt.put("cache-control", "no-cache=\"set-cookie\"");
 			
 			final boolean logMINOR = Logger.shouldLog(LogLevel.MINOR, ToadletContextImpl.class);
 
@@ -270,24 +270,30 @@ public class ToadletContextImpl implements ToadletContext {
 		if(contentLength >= 0)
 			mvt.put("content-length", Long.toString(contentLength));
 		
-		String expiresTime;
-		if (mTime == null) {
-			expiresTime = "Thu, 01 Jan 1970 00:00:00 GMT";
-		} else {
-			// use an expiry time of 1 day, somewhat arbitrarily
-			expiresTime = TimeUtil.makeHTTPDate(mTime.getTime() + (24 * 60 * 60 * 1000));
+		// TODO: arg or instance member: assert(!mvt.containsKey("expires"));
+		if(!mvt.containsKey("expires")) {
+			String expiresTime;
+			if (mTime == null) {
+				expiresTime = "Thu, 01 Jan 1970 00:00:00 GMT";
+			} else {
+				// use an expire time of 1 day, somewhat arbitrarily
+				expiresTime = TimeUtil.makeHTTPDate(mTime.getTime() + (24 * 60 * 60 * 1000));
+			}
+			mvt.put("expires", expiresTime);
+		} else if(mvt.get("expires").equals("MAX")) {
+			// Replace "MAX" with "in one year"
+			mvt.remove("expires");
+			mvt.put("expires", TimeUtil.makeHTTPDate(mTime.getTime() + (365 * 24 * 60 * 60 * 1000)));
 		}
-		mvt.put("expires", expiresTime);
+
+		// Send "Last-Modified" only, if mTime is provided.
+		if (mTime != null) {
+			String lastModString;
+			lastModString = TimeUtil.makeHTTPDate(mTime.getTime());
+			mvt.put("last-modified", lastModString);
+		}
 		
 		String nowString = TimeUtil.makeHTTPDate(System.currentTimeMillis());
-		String lastModString;
-		if (mTime == null) {
-			lastModString = nowString;
-		} else {
-			lastModString = TimeUtil.makeHTTPDate(mTime.getTime());
-		}
-		
-		mvt.put("last-modified", lastModString);
 		mvt.put("date", nowString);
 		if (mTime == null) {
 			mvt.put("pragma", "no-cache");

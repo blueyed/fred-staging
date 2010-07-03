@@ -13,6 +13,7 @@ import freenet.l10n.NodeL10n;
 import freenet.node.DarknetPeerNode;
 import freenet.node.Node;
 import freenet.node.SecurityLevels;
+import freenet.node.Version;
 import freenet.pluginmanager.FredPluginL10n;
 import freenet.support.HTMLNode;
 import freenet.support.Logger;
@@ -160,7 +161,14 @@ public final class PageMaker {
 	void setOverride(File f) {
 		this.override = f;
 	}
-	
+
+	/**
+	 * Set theme.
+	 * This verifies that the theme's theme.css exists, and falls
+	 * back to the default.
+	 * @see THEME.getDefault
+	 * @param theme2 Theme code (null for default)
+	 */
 	public void setTheme(THEME theme2) {
 		if (theme2 == null) {
 			this.theme = THEME.getDefault();
@@ -239,20 +247,20 @@ public final class PageMaker {
 		//To make something only rendered when javascript is on, then add the jsonly class to it
 		headNode.addChild("noscript").addChild("style"," .jsonly {display:none;}");
 		if(override == null)
-			headNode.addChild("link", new String[] { "rel", "href", "type", "title" }, new String[] { "stylesheet", "/static/themes/" + theme.code + "/theme.css", "text/css", theme.code });
+			headNode.addChild("link", new String[] { "rel", "href", "type", "title" }, new String[] { "stylesheet", "/static/themes/" + theme.code + "/theme.css" + "?version=" + Version.cvsRevision(), "text/css", theme.code });
 		else
 			headNode.addChild(getOverrideContent());
 		for (THEME t: THEME.values()) {
 			String themeName = t.code;
-			headNode.addChild("link", new String[] { "rel", "href", "type", "media", "title" }, new String[] { "alternate stylesheet", "/static/themes/" + themeName + "/theme.css", "text/css", "screen", themeName });
+			headNode.addChild("link", new String[] { "rel", "href", "type", "media", "title" }, new String[] { "alternate stylesheet", "/static/themes/" + themeName + "/theme.css" + "?version=" + Version.cvsRevision(), "text/css", "screen", themeName });
 		}
 		
 		boolean webPushingEnabled = 
 			ctx != null && ctx.getContainer().isFProxyJavascriptEnabled() && ctx.getContainer().isFProxyWebPushingEnabled();
 		
-		// Add the generated javascript, if it and pushing is enabled
+		// Add the generated javascript, if JS and pushing is enabled
 		if (webPushingEnabled) headNode.addChild("script", new String[] { "type", "language", "src" }, new String[] {
-				"text/javascript", "javascript", "/static/freenetjs/freenetjs.nocache.js" });
+				"text/javascript", "javascript", "/static/freenetjs/freenetjs.nocache.js" + "?version=" + Version.cvsRevision() });
 		
 		Toadlet t;
 		if (ctx != null) {
