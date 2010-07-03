@@ -260,7 +260,7 @@ public class SplitFileFetcherSegment implements FECCallback {
 				}
 				Bucket data = status.getData();
 				if(data == null) 
-					throw new NullPointerException("Data bucket "+i+" of "+dataBuckets.length+" is null in writeDecodedData");
+					throw new NullPointerException("Data bucket "+i+" of "+dataBuckets.length+" is null in writeDecodedData on "+this+" status = "+status+" number "+status.getNumber()+" data "+status.getData()+" persistence = "+persistent+(persistent ? (" (block active = "+container.ext().isActive(status)+" block ID = "+container.ext().getID(status)+" seg active="+container.ext().isActive(this)+")"):""));
 				if(persistent) container.activate(data, 1);
 				long copy;
 				if(truncateLength < 0)
@@ -826,6 +826,7 @@ public class SplitFileFetcherSegment implements FECCallback {
 				container.store(this);
 			}
 		}
+		if(logMINOR) Logger.minor(this, "Checked blocks.");
 		// Defer the completion until we have generated healing blocks if we are collecting binary blobs.
 		if(isCollectingBinaryBlob()) {
 			if(persistent)
@@ -879,10 +880,6 @@ public class SplitFileFetcherSegment implements FECCallback {
 			try {
 				copy = context.tempBucketFactory.makeBucket(data.size());
 				BucketTools.copy(data, copy);
-				data.free();
-				if(persistent)
-					data.removeFrom(container);
-				data = copy;
 			} catch (IOException e) {
 				Logger.normal(this, "Failed to copy data for healing: "+e, e);
 				return data;
@@ -1126,6 +1123,7 @@ public class SplitFileFetcherSegment implements FECCallback {
 	}
 
 	void fail(FetchException e, ObjectContainer container, ClientContext context, boolean dontDeactivateParent) {
+		if(logMINOR) Logger.minor(this, "Failing segment "+this, e);
 		synchronized(this) {
 			if(finished) return;
 			finished = true;
@@ -1729,6 +1727,7 @@ public class SplitFileFetcherSegment implements FECCallback {
 			if(!encoderFinished) return;
 			if(!fetcherHalfFinished) return;
 		}
+		if(logMINOR) Logger.minor(this, "Freeing decoded data on segment "+this);
 		if(decodedData != null) {
 			if(persistent)
 				container.activate(decodedData, 1);
