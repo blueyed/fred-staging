@@ -419,6 +419,7 @@ public class SplitFileFetcherSegment implements FECCallback {
 			if(allFailed) res |= ON_SUCCESS_ALL_FAILED;
 			if(decodeNow) res |= ON_SUCCESS_DECODE_NOW;
 		}
+		if(persistent) container.store(this);
 		if(crossSegment != null) {
 			if(persistent) container.activate(crossSegment, 1);
 			crossSegment.onFetched(this, blockNo, container, context);
@@ -445,13 +446,15 @@ public class SplitFileFetcherSegment implements FECCallback {
 		if(logMINOR) Logger.minor(this, "Fetched block "+blockNo+" in "+this+" data="+dataBuckets.length+" check="+checkBuckets.length);
 		try {
 			if(!maybeAddToBinaryBlob(data, block, blockNo, container, context, block == null ? "CROSS-SEGMENT FEC" : "UNKNOWN")) {
-				if(block == null) {
+				if((ignoreLastDataBlock && blockNo == dataKeys.length-1) || (ignoreLastDataBlock && fetchedDataBlocks == dataKeys.length)) {
+					// Ignore
+				} else if(block == null) {
 					// Cross-segment, just return false.
 					Logger.error(this, "CROSS-SEGMENT DECODED/ENCODED BLOCK INVALID: "+blockNo, new Exception("error"));
 					return false;
 				} else {
 					Logger.error(this, "DATA BLOCK INVALID: "+blockNo, new Exception("error"));
-					this.onFatalFailure(new FetchException(FetchException.INTERNAL_ERROR, "Invalid block"), blockNo, null, container, context);
+					onFatalFailure(new FetchException(FetchException.INTERNAL_ERROR, "Invalid block"), blockNo, null, container, context);
 				}
 			}
 		} catch (FetchException e) {
@@ -630,21 +633,26 @@ public class SplitFileFetcherSegment implements FECCallback {
 				}
 			}
 		}
+		boolean allDecodedCorrectly = true;
 		for(int i=0;i<dataBuckets.length;i++) {
 			Bucket data = dataBlockStatus[i].getData();
 			if(data == null) 
 				throw new NullPointerException("Data bucket "+i+" of "+dataBuckets.length+" is null in onDecodedSegment");
 			try {
 				if(!maybeAddToBinaryBlob(data, null, i, container, context, "FEC DECODE")) {
-					Logger.error(this, "Data block "+i+" FAILED TO DECODE CORRECTLY");
+					if((!(ignoreLastDataBlock && i == dataKeys.length-1)) &&
+							(!(ignoreLastDataBlock && fetchedDataBlocks == dataKeys.length)))
+						Logger.error(this, "Data block "+i+" FAILED TO DECODE CORRECTLY");
 					// Disable healing.
 					dataRetries[i] = 0;
+					allDecodedCorrectly = false;
 				}
 			} catch (FetchException e) {
 				fail(e, container, context, false);
 				return;
 			}
 		}
+		if(allDecodedCorrectly && logMINOR) Logger.minor(this, "All decoded correctly on "+this);
 		// Must set finished BEFORE calling parentFetcher.
 		// Otherwise a race is possible that might result in it not seeing our finishing.
 		finished = true;
@@ -767,12 +775,14 @@ public class SplitFileFetcherSegment implements FECCallback {
 					}
 				}
 			}
+			boolean allEncodedCorrectly = true;
 			for(int i=0;i<checkBuckets.length;i++) {
 				boolean heal = false;
 				// Check buckets will already be active because the FEC codec
 				// has been using them.
 				if(checkBuckets[i] == null) {
 					Logger.error(this, "Check bucket "+i+" is null in onEncodedSegment on "+this);
+					allEncodedCorrectly = false;
 					continue;
 				}
 				if(checkBuckets[i] != checkBlockStatus[i]) {
@@ -801,7 +811,9 @@ public class SplitFileFetcherSegment implements FECCallback {
 				try {
 					if(!maybeAddToBinaryBlob(data, null, i+dataKeys.length, container, context, "FEC ENCODE")) {
 						heal = false;
-						Logger.error(this, "FAILED TO ENCODE CORRECTLY so not healing check block "+i);
+						if(!(ignoreLastDataBlock && fetchedDataBlocks == dataKeys.length))
+							Logger.error(this, "FAILED TO ENCODE CORRECTLY so not healing check block "+i);
+						allEncodedCorrectly = false;
 					}
 				} catch (FetchException e) {
 					fail(e, container, context, false);
@@ -825,6 +837,10 @@ public class SplitFileFetcherSegment implements FECCallback {
 				if(persistent && checkKeys[i] != null)
 					checkKeys[i].removeFrom(container);
 				checkKeys[i] = null;
+			}
+			if(logMINOR) {
+				if(allEncodedCorrectly) Logger.minor(this, "All encoded correctly on "+this);
+				else Logger.minor(this, "Not encoded correctly on "+this);
 			}
 			if(persistent && !fetcherFinished) {
 				container.store(this);
@@ -873,6 +889,9 @@ public class SplitFileFetcherSegment implements FECCallback {
 						if(!(key.equals(block.getClientKey()))) {
 							if(ignoreLastDataBlock && blockNo == dataKeys.length-1 && dataSource.equals("FEC DECODE")) {
 								if(logMINOR) Logger.minor(this, "Last block wrong key, ignored because expected due to padding issues");
+							} else if(ignoreLastDataBlock && fetchedDataBlocks == dataKeys.length) {
+								// We padded the last block. The inserter might have used a different padding algorithm.
+								if(logMINOR) Logger.minor(this, "Wrong key, might be due to padding issues");
 							} else {
 								Logger.error(this, "INVALID KEY FROM "+dataSource+": Block "+blockNo+" (data "+dataKeys.length+" check "+checkKeys.length+" ignore last block="+ignoreLastDataBlock+") : key "+block.getClientKey().getURI()+" should be "+key.getURI(), new Exception("error"));
 							}
