@@ -1216,13 +1216,13 @@ public class SplitFileInserterSegment extends SendableInsert implements FECCallb
 		else if(treatAsSuccess)
 			putter.completedBlock(false, container, context);
 		if(persistent) container.deactivate(putter, 1);
-		if(treatAsSuccess && succeeded == dataBlocks.length) {
-			if(persistent) container.activate(parent, 1);
-			parent.segmentFetchable(this, container);
-			if(persistent) container.deactivate(parent, 1);
-		} else if(completed == dataBlocks.length + checkBlocks.length) {
+		if(completed == dataBlocks.length + checkBlocks.length) {
 			if(persistent) container.activate(parent, 1);
 			finish(container, context, parent);
+			if(persistent) container.deactivate(parent, 1);
+		} else if(treatAsSuccess && succeeded == dataBlocks.length) {
+			if(persistent) container.activate(parent, 1);
+			parent.segmentFetchable(this, container);
 			if(persistent) container.deactivate(parent, 1);
 		}
 	}
@@ -1300,13 +1300,13 @@ public class SplitFileInserterSegment extends SendableInsert implements FECCallb
 		if(persistent) container.activate(putter, 1);
 		putter.completedBlock(false, container, context);
 		if(persistent) container.deactivate(putter, 1);
-		if(succeeded == dataBlocks.length) {
-			if(persistent) container.activate(parent, 1);
-			parent.segmentFetchable(this, container);
-			if(persistent) container.deactivate(parent, 1);
-		} else if(completed == dataBlocks.length + checkBlocks.length) {
+		if(completed == dataBlocks.length + checkBlocks.length) {
 			if(persistent) container.activate(parent, 1);
 			finish(container, context, parent);
+			if(persistent) container.deactivate(parent, 1);
+		} else if(succeeded == dataBlocks.length) {
+			if(persistent) container.activate(parent, 1);
+			parent.segmentFetchable(this, container);
 			if(persistent) container.deactivate(parent, 1);
 		}
 	}
@@ -1322,7 +1322,6 @@ public class SplitFileInserterSegment extends SendableInsert implements FECCallb
 			container.activate(this, 1);
 			container.activate(blocks, 1);
 		}
-		byte crytoAlgorithm = getCryptoAlgorithm(container);
 		synchronized(this) {
 			if(finished) return null;
 			if(blocks.isEmpty()) {
@@ -1450,6 +1449,9 @@ public class SplitFileInserterSegment extends SendableInsert implements FECCallb
 					context.mainExecutor.execute(new Runnable() {
 
 						public void run() {
+							// Make absolutely sure even if we run the two jobs out of order.
+							// Overhead for double-checking should be very low.
+							seg.onEncode(num, key, null, context);
 							req.onInsertSuccess(context);
 						}
 
