@@ -551,6 +551,31 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 
 	}
 
+	// FIXME: DB4O ISSUE: HASHMAP ACTIVATION:
+	
+	// Unfortunately this class uses a lot of HashMap's, and is persistent.
+	// The two things do not play well together!
+	
+	// Activating a HashMap to depth 1 breaks it badly, so that even if it is then activated to a higher depth, it remains empty.
+	// Activating a HashMap to depth 2 loads the elements but does not activate them. In particular, Metadata's used as keys will not have their hashCode loaded so we end up with all of them on the 0th slot.
+	// Activating a HashMap to depth 3 loads it properly, including activating both the keys and values to depth 1.
+	// Of course, the side effect of activating the values to depth 1 may cause problems ...
+
+	// OPTIONS:
+	// 1. Activate to depth 2. Activate the Metadata we are looking for *FIRST*!
+	// Then the Metadata we are looking for will be in the correct slot.
+	// Everything else will be in the 0'th slot, in one long chain, i.e. if there are lots of entries it will be a very inefficient HashMap.
+	
+	// 2. Activate to depth 3.
+	// If there are lots of entries, we have a significant I/O cost for activating *all* of them.
+	// We also have the possibility of a memory/space leak if these are linked from somewhere that assumed they had been deactivated.
+	
+	// Clearly option 1 is superior. However they both suck.
+	// The *correct* solution is to use a HashMap from a primitive type e.g. a String, so we can use depth 2.
+	
+	// Note that this also applies to HashSet's: The entries are the keys, and they are not activated, so we end up with them all in a long chain off bucket 0, except any that are already active.
+	// We don't have any real problems because the caller is generally already active - but it is grossly inefficient.
+	
 	private HashMap<String,Object> putHandlersByName;
 	private HashSet<PutHandler> runningPutHandlers;
 	private HashSet<PutHandler> putHandlersWaitingForMetadata;
@@ -963,7 +988,7 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 			// Treat it as a splitfile for purposes of determining reinserts.
 			metadataInserter =
 				new SingleFileInserter(this, this, block, isMetadata, ctx, (archiveType == ARCHIVE_TYPE.ZIP) , getCHKOnly, false, baseMetadata, archiveType, true, null, earlyEncode, true, persistent(), 0, 0, null, cryptoAlgorithm, ckey);
-			if(logMINOR) Logger.minor(this, "Inserting main metadata: "+metadataInserter+" for "+baseMetadata);
+			if(logMINOR) Logger.minor(this, "Inserting main metadata: "+metadataInserter+" for "+baseMetadata+" for "+this);
 			if(persistent()) {
 				container.activate(metadataPuttersByMetadata, 2);
 				container.activate(metadataPuttersUnfetchable, 2);
@@ -1086,8 +1111,8 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 			container.activate(metadataPuttersByMetadata, 2);
 		for(int i=0;i<metas.length;i++) {
 			Metadata m = metas[i];
-			if(persistent()) container.activate(m, 100);
-			if(logMINOR) Logger.minor(this, "Resolving "+m);
+			if(persistent()) container.activate(m, Integer.MAX_VALUE);
+			if(logMINOR) Logger.minor(this, "Resolving "+m+" for "+this);
 			synchronized(this) {
 				if(metadataPuttersByMetadata.containsKey(m)) {
 					if(logMINOR) Logger.minor(this, "Already started insert for "+m+" in resolve() for "+metas.length+" Metadata's");
@@ -1390,14 +1415,19 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 	}
 
 	public void onSuccess(ClientPutState state, ObjectContainer container, ClientContext context) {
+		Metadata token = (Metadata) state.getToken();
 		if(persistent()) {
+			// See comments at the beginning of the file re HashMap activation.
+			// We MUST activate token first, and we MUST activate the maps to depth 2.
+			// And everything that isn't already active will end up on a long chain off bucket 0, so this isn't terribly efficient!
+			// Fortunately the chances of having a lot of metadata putters are quite low.
+			// This is not necessarily the case for running* ...
+			container.activate(token, 1);
 			container.activate(metadataPuttersByMetadata, 2);
 		}
 		boolean fin = false;
 		ClientPutState oldState = null;
-		Metadata token = (Metadata) state.getToken();
 		synchronized(this) {
-			if(persistent()) container.activate(token, 1);
 			boolean present = metadataPuttersByMetadata.containsKey(token);
 			if(present) {
 				oldState = metadataPuttersByMetadata.remove(token);
@@ -1408,9 +1438,35 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 					if(persistent())
 						container.ext().store(metadataPuttersUnfetchable, 2);
 				}
+			} else {
+				if(logMINOR) Logger.minor(this, "Did not remove metadata putter "+state+" for "+token+" because not present");
 			}
 			if(!metadataPuttersByMetadata.isEmpty()) {
-				if(logMINOR) Logger.minor(this, "Still running metadata putters: "+metadataPuttersByMetadata.size());
+				if(logMINOR) {
+					Logger.minor(this, "Still running metadata putters: "+metadataPuttersByMetadata.size());
+					// FIXME simplify when confident that it works.
+					// We do want to show what's still running though.
+					for(Map.Entry<Metadata,ClientPutState> entry : metadataPuttersByMetadata.entrySet()) {
+						boolean active = true;
+						boolean metaActive = true;
+						ClientPutState s = entry.getValue();
+						Metadata key = entry.getKey();
+						if(persistent()) {
+							active = container.ext().isActive(s);
+							if(!active) container.activate(s, 1);
+							metaActive = container.ext().isActive(key);
+							if(!active) container.activate(metaActive, 1);
+						}
+						Logger.minor(this, "Still waiting for "+s+" for "+key);
+						if(persistent()) Logger.minor(this, "Key id is "+container.ext().getID(key));
+						if(key == token)
+							Logger.error(this, "MATCHED, yet didn't find it earlier?!");
+						if(key.equals(token))
+							Logger.error(this, "MATCHED ON equals(), yet didn't find it earlier and not == ?!");
+						if(!active) container.deactivate(s, 1);
+						if(!metaActive) container.deactivate(key, 1);
+					}
+				}
 			} else {
 				Logger.minor(this, "Inserted manifest successfully on "+this+" : "+state);
 				insertedManifest = true;
@@ -1506,7 +1562,7 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 	public void onTransition(ClientPutState oldState, ClientPutState newState, ObjectContainer container) {
 		Metadata m = (Metadata) oldState.getToken();
 		if(persistent()) {
-			container.activate(m, 100);
+			container.activate(m, Integer.MAX_VALUE);
 			container.activate(metadataPuttersUnfetchable, 2);
 			container.activate(metadataPuttersByMetadata, 2);
 		}
@@ -1537,7 +1593,7 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 		}
 
 		if(persistent()) {
-			container.deactivate(m, 100);
+			container.deactivate(m, 1);
 			container.deactivate(metadataPuttersUnfetchable, 2);
 			container.deactivate(metadataPuttersByMetadata, 2);
 		}
@@ -1766,7 +1822,7 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 	public void onFetchable(ClientPutState state, ObjectContainer container) {
 		Metadata m = (Metadata) state.getToken();
 		if(persistent()) {
-			container.activate(m, 100);
+			container.activate(m, Integer.MAX_VALUE);
 			container.activate(metadataPuttersUnfetchable, 2);
 			container.activate(putHandlersWaitingForFetchable, 2);
 		}

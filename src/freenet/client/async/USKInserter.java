@@ -269,9 +269,7 @@ public class USKInserter implements ClientPutState, USKFetcherCallback, PutCompl
 			if(persistent) container.activate(data, 1);
 			data.free();
 			if(persistent) data.removeFrom(container);
-			synchronized(this) {
-				data = null;
-			}
+			data = null;
 			if(persistent) container.store(this);
 		}
 		if(persistent) {
@@ -298,13 +296,18 @@ public class USKInserter implements ClientPutState, USKFetcherCallback, PutCompl
 				else
 					scheduleInsert(container, context);
 			} else {
-				if(freeData) {
-					if(persistent) container.activate(data, 1);
-					data.free();
-					if(persistent) data.removeFrom(container);
-					synchronized(this) {
+				Bucket d = null;
+				synchronized(this) {
+					finished = true;
+					if(freeData) {
+						d = data;
 						data = null;
 					}
+				}
+				if(freeData) {
+					if(persistent) container.activate(d, 1);
+					d.free();
+					if(persistent) d.removeFrom(container);
 					if(persistent) container.store(this);
 				}
 				if(persistent)
