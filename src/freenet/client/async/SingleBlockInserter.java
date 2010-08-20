@@ -226,11 +226,6 @@ public class SingleBlockInserter extends SendableInsert implements ClientPutStat
 	}
 
 	@Override
-	public int getRetryCount() {
-		return retries;
-	}
-
-	@Override
 	public void onFailure(LowLevelPutException e, Object keyNum, ObjectContainer container, ClientContext context) {
 		synchronized(this) {
 			if(finished) return;
@@ -289,7 +284,7 @@ public class SingleBlockInserter extends SendableInsert implements ClientPutStat
 			container.store(this);
 			container.deactivate(ctx, 1);
 		}
-		getScheduler(context).registerInsert(this, persistent, false, container);
+		clearCooldown(context);
 	}
 
 	private void fail(InsertException e, ObjectContainer container, ClientContext context) {

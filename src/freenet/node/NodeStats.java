@@ -23,6 +23,7 @@ import freenet.support.HTMLNode;
 import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.SimpleFieldSet;
+import freenet.support.SizeUtil;
 import freenet.support.StringCounter;
 import freenet.support.TimeUtil;
 import freenet.support.TokenBucket;
@@ -244,7 +245,7 @@ public class NodeStats implements Persistable {
 	
 
 
-	NodeStats(Node node, int sortOrder, SubConfig statsConfig, int obwLimit, int ibwLimit, File nodeDir) throws NodeInitException {
+	NodeStats(Node node, int sortOrder, SubConfig statsConfig, int obwLimit, int ibwLimit, File nodeDir, int lastVersion) throws NodeInitException {
 		this.node = node;
 		this.peers = node.peers;
 		this.hardRandom = node.random;
@@ -271,15 +272,21 @@ public class NodeStats implements Persistable {
 
 		int defaultThreadLimit;
 		long memoryLimit = Runtime.getRuntime().maxMemory();
-		if(memoryLimit > 0 && memoryLimit < 128*1024*1024)
+		
+		System.out.println("Memory is "+SizeUtil.formatSize(memoryLimit)+" ("+memoryLimit+" bytes)");
+		if(memoryLimit > 0 && memoryLimit < 100*1024*1024) {
 			defaultThreadLimit = 200;
-		else if(memoryLimit > 0 && memoryLimit < 192*1024*1024)
+			System.out.println("Severe memory pressure, setting 200 thread limit. Freenet may not work well!");
+		} else if(memoryLimit > 0 && memoryLimit < 160*1024*1024) {
 			defaultThreadLimit = 300;
+			System.out.println("Moderate memory pressure, setting 300 thread limit. Increase your memory limit in wrapper.conf if possible.");
 		// FIXME: reinstate this once either we raise the default or memory autodetection works on Windows.
 //		else if(memoryLimit > 0 && memoryLimit < 256*1024*1024)
 //			defaultThreadLimit = 400;
-		else
+		} else {
+			System.out.println("Setting standard 500 thread limit. This should be enough for most nodes but more memory is usually a good thing.");
 			defaultThreadLimit = 500;
+		}
 		statsConfig.register("threadLimit", defaultThreadLimit, sortOrder++, true, true, "NodeStat.threadLimit", "NodeStat.threadLimitLong",
 				new IntCallback() {
 					@Override
@@ -295,6 +302,10 @@ public class NodeStats implements Persistable {
 						threadLimit = val;
 					}
 		},false);
+		
+		if(lastVersion > 0 && lastVersion < 1270 && memoryLimit > 160*1024*1024 && memoryLimit < 192*1024*1024)
+			statsConfig.fixOldDefault("threadLimit", "300");
+		
 		threadLimit = statsConfig.getInt("threadLimit");
 		
 		// Yes it could be in seconds insteed of multiples of 0.12, but we don't want people to play with it :)
@@ -553,7 +564,13 @@ public class NodeStats implements Persistable {
 	static final double DEFAULT_OVERHEAD = 0.7;
 	static final long DEFAULT_ONLY_PERIOD = 60*1000;
 	static final long DEFAULT_TRANSITION_PERIOD = 240*1000;
-	static final double MIN_OVERHEAD = 0.2;
+	/** Relatively high minimum overhead. A low overhead estimate becomes a self-fulfilling
+	 * prophecy, and it takes a long time to shake it off as the averages gradually increase.
+	 * If we accept no requests then everything is overhead! Whereas with a high minimum 
+	 * overhead the worst case is that more stuff succeeds than expected and we have a few 
+	 * timeouts (because output bandwidth liability was assuming a lower overhead than 
+	 * actually happens) - but this should be very rare. */
+	static final double MIN_OVERHEAD = 0.5;
 	
 	/* return reject reason as string if should reject, otherwise return null */
 	public String shouldRejectRequest(boolean canAcceptAnyway, boolean isInsert, boolean isSSK, boolean isLocal, boolean isOfferReply, PeerNode source, boolean hasInStore, boolean preferInsert) {

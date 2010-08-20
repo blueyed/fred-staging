@@ -624,6 +624,7 @@ public class NodeUpdateManager {
 		long now = System.currentTimeMillis();
 		long startedMillisAgo;
 		synchronized(this) {
+			if(mainUpdater == null) return false;
 			if(!(hasNewMainJar || hasNewExtJar)) {
 				if(logMINOR) Logger.minor(this, "hasNewMainJar="+hasNewMainJar+" hasNewExtJar="+hasNewExtJar);
 				return false; // no jar
@@ -931,8 +932,10 @@ public class NodeUpdateManager {
 	
 	private int getReadyExt() {
 		int ver = NodeStarter.extBuildNumber;
-		int fetched = extUpdater.getFetchedVersion();
-		if(fetched > 0) ver = fetched;
+		if(extUpdater != null) {
+			int fetched = extUpdater.getFetchedVersion();
+			if(fetched > 0) ver = fetched;
+		}
 		return ver;
 	}
 

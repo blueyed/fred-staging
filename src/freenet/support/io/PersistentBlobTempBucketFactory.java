@@ -199,15 +199,8 @@ public class PersistentBlobTempBucketFactory {
 			synchronized(PersistentBlobTempBucketFactory.this) {
 				if(freeSlots.size() > MAX_FREE) return false;
 			}
-			long size;
-			try {
-				size = channel.size();
-			} catch (IOException e1) {
-				Logger.error(this, "Unable to find size of temp blob storage file: "+e1, e1);
-				return false;
-			}
-			size -= size % blockSize;
-			long blocks = size / blockSize;
+			long blocks = getSize();
+			if(blocks == Long.MAX_VALUE) return false;
 			long ptr = blocks - 1;
 
 			boolean changedTags = false;
@@ -316,7 +309,7 @@ public class PersistentBlobTempBucketFactory {
 			long addBlocks = Math.min(8192, (blocks / 10) + 32);
 			long extendBy = addBlocks * blockSize;
 			long written = 0;
-			byte[] buf = new byte[4096];
+			byte[] buf = new byte[65536];
 			ByteBuffer buffer = ByteBuffer.wrap(buf);
 			while(written < extendBy) {
 				weakRandomSource.nextBytes(buf);
@@ -324,11 +317,14 @@ public class PersistentBlobTempBucketFactory {
 				if(bytesLeft < buf.length)
 					buffer.limit(bytesLeft);
 				try {
-					written += channel.write(buffer, size + written);
+					written += channel.write(buffer, blocks * blockSize + written);
 					buffer.clear();
 				} catch (IOException e) {
 					break;
 				}
+			}
+			synchronized(this) {
+				cachedSize = blocks + addBlocks;
 			}
 			query = container.query();
 			query.constrain(PersistentBlobTempBucketTag.class);
@@ -338,7 +334,7 @@ public class PersistentBlobTempBucketFactory {
 			while(results.hasNext()) {
 				PersistentBlobTempBucketTag tag = results.next();
 				if(!tag.isFree) {
-					Logger.error(this, "Block already exists beyond the end of the file, yet is occupied: block "+tag.index);
+					Logger.error(this, "Block already exists beyond the end of the file ("+blocks+"), yet is occupied: block "+tag.index);
 				}
 				if(taken == null) taken = new HashSet<Long>();
 				taken.add(tag.index);
@@ -435,8 +431,12 @@ public class PersistentBlobTempBucketFactory {
 		notCommittedBlobs.remove(index);
 		bucket.onFree();
 		if(!bucket.persisted()) {
-			// If it hasn't been written to the database, it doesn't need to be removed, so removeFrom() won't be called.
-			freeSlots.put(index, bucket.getTag());
+			if(bucket.getTag() == null) {
+				Logger.error(this, "freeBucket but tag is null for "+bucket+" - not activated???", new Exception("error"));
+			} else {
+				// If it hasn't been written to the database, it doesn't need to be removed, so removeFrom() won't be called.
+				freeSlots.put(index, bucket.getTag());
+			}
 		}
 		PersistentBlobTempBucket shadow = shadows.get(index);
 		if(shadow != null) {
@@ -483,18 +483,26 @@ public class PersistentBlobTempBucketFactory {
 				}
 			}
 		}
-		container.activate(tag, 1);
-		// Probably best to store the tag even if the bucket was never persisted.
-		if(!bucket.freed()) {
-			Logger.error(this, "Removing bucket "+bucket+" for slot "+index+" but not freed!", new Exception("debug"));
-			notCommittedBlobs.put(index, bucket);
+		if(tag != null) {
+			container.activate(tag, 1);
+			// Probably best to store the tag even if the bucket was never persisted.
+			if(!bucket.freed()) {
+				Logger.error(this, "Removing bucket "+bucket+" for slot "+index+" but not freed!", new Exception("debug"));
+				notCommittedBlobs.put(index, bucket);
+			} else {
+				almostFreeSlots.put(index, tag);
+				notCommittedBlobs.remove(index);
+			}
+			tag.bucket = null;
+			tag.isFree = true;
+			container.store(tag);
 		} else {
-			almostFreeSlots.put(index, tag);
-			notCommittedBlobs.remove(index);
+			Logger.error(this, "Tag still null for "+bucket, new Exception("error"));
+			if(!bucket.freed()) {
+				Logger.error(this, "Removing bucket "+bucket+" for slot "+index+" but not freed!", new Exception("debug"));
+				notCommittedBlobs.put(index, bucket);
+			}
 		}
-		tag.bucket = null;
-		tag.isFree = true;
-		container.store(tag);
 		container.delete(bucket);
 		bucket.onRemove();
 		
@@ -516,15 +524,11 @@ public class PersistentBlobTempBucketFactory {
 			if(now - lastCheckedEnd > 60*1000) {
 				if(logMINOR) Logger.minor(this, "maybeShrink() inner");
 				// Check whether there is a big white space at the end of the file.
-				long size;
-				try {
-					size = channel.size();
-				} catch (IOException e1) {
-					Logger.error(this, "Unable to find size of temp blob storage file: "+e1, e1);
+				long blocks = getSize();
+				if(blocks == Long.MAX_VALUE) {
+					Logger.error(this, "Not shrinking, unable to determine size");
 					return false;
 				}
-				size -= size % blockSize;
-				long blocks = size / blockSize;
 				if(blocks <= 32) {
 					if(logMINOR) Logger.minor(this, "Not shrinking, blob file not larger than a megabyte");
 					lastCheckedEnd = now;
@@ -673,9 +677,9 @@ public class PersistentBlobTempBucketFactory {
 					return false;
 				}
 				Logger.normal(this, "Shrinking blob file from "+blocks+" to "+newBlocks);
+				// Not safe to remove from almostFreeSlots here.
 				for(long l = newBlocks; l <= blocks; l++) {
 					freeSlots.remove(l);
-					almostFreeSlots.remove(l);
 				}
 				for(Long l : freeSlots.keySet()) {
 					if(l > newBlocks) {
@@ -686,6 +690,7 @@ public class PersistentBlobTempBucketFactory {
 				lastCheckedEnd = now;
 				queueMaybeShrink();
 			} else return false;
+			cachedSize = newBlocks;
 		}
 		try {
 			channel.truncate(newBlocks * blockSize);
@@ -701,7 +706,9 @@ public class PersistentBlobTempBucketFactory {
 		ObjectSet<PersistentBlobTempBucketTag> tags = query.execute();
 		long deleted = 0;
 		while(tags.hasNext()) {
-			container.delete(tags.next());
+			PersistentBlobTempBucketTag tag = tags.next();
+			if(logMINOR) Logger.minor(this, "Deleting tag "+tag+" for index "+tag.index);
+			container.delete(tag);
 			deleted++;
 			if(deleted > 1024) break;
 		}
@@ -730,6 +737,7 @@ public class PersistentBlobTempBucketFactory {
 								Logger.error(this, "Tag with bucket beyond end of file! index="+tag.index+" bucket="+tag.bucket);
 								continue;
 							}
+							if(logMINOR) Logger.minor(this, "Deleting tag "+tag+" for index "+tag.index);
 							container.delete(tag);
 							deleted++;
 							if(deleted > 1024) break;
@@ -832,16 +840,35 @@ public class PersistentBlobTempBucketFactory {
 	public synchronized void postCommit() {
 		int freeNow = freeSlots.size();
 		int sz = freeNow + almostFreeSlots.size();
+		if(sz == 0) return;
+		long blocks = getSize();
 		if(sz > MAX_FREE) {
 			Iterator<Map.Entry<Long,PersistentBlobTempBucketTag>> it = almostFreeSlots.entrySet().iterator();
-			for(int i=freeNow;i<MAX_FREE && it.hasNext();i++) {
+			while(freeNow < MAX_FREE && it.hasNext()) {
 				Map.Entry<Long,PersistentBlobTempBucketTag> entry = it.next();
-				freeSlots.put(entry.getKey(), entry.getValue());
+				Long slot = entry.getKey();
+				if(slot >= blocks) continue;
+				if(entry.getValue() != null)
+					freeSlots.put(entry.getKey(), entry.getValue());
+				freeNow++;
 			}
-		} else {
-			freeSlots.putAll(almostFreeSlots);
 		}
 		almostFreeSlots.clear();
+	}
+	
+	private transient long cachedSize;
+
+	private synchronized long getSize() {
+		if(cachedSize != Long.MAX_VALUE && cachedSize != 0) return cachedSize;
+		long size;
+		try {
+			size = channel.size();
+		} catch (IOException e1) {
+			Logger.error(this, "Unable to find size of temp blob storage file: "+e1, e1);
+			return Long.MAX_VALUE;
+		}
+		size -= size % blockSize;
+		return cachedSize = size / blockSize;
 	}
 
 	public Bucket createShadow(PersistentBlobTempBucket bucket) {

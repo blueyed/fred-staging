@@ -44,8 +44,6 @@ public abstract class SendableRequest implements RandomGrabArrayItem {
 	/** Get the priority class of the request. */
 	public abstract short getPriorityClass(ObjectContainer container);
 	
-	public abstract int getRetryCount();
-	
 	/** Choose a key to fetch. Removes the block number from any internal queues 
 	 * (but not the key itself, implementors must have a separate queue of block 
 	 * numbers and mapping of block numbers to keys).
@@ -106,7 +104,7 @@ public abstract class SendableRequest implements RandomGrabArrayItem {
 		if(arr != null) {
 			if(persistent)
 				container.activate(arr, 1);
-			arr.remove(this, container);
+			arr.remove(this, container, context);
 		} else {
 			// Should this be a higher priority?
 			if(Logger.shouldLog(LogLevel.MINOR, this))
@@ -137,6 +135,22 @@ public abstract class SendableRequest implements RandomGrabArrayItem {
 
 	public boolean isStorageBroken(ObjectContainer container) {
 		return false;
+	}
+
+	/** Must be called when we retry a block. */
+	public void clearCooldown(ClientContext context) {
+		// The request is no longer running, therefore presumably it can be selected, or it's been removed.
+		// Stuff that uses the cooldown queue will set or clear depending on whether we retry, but
+		// we clear here for stuff that doesn't use it.
+		// Note also that the performance cost of going over that particular part of the tree again should be very low.
+		context.cooldownTracker.clearCachedWakeup(this, false, null);
+		// It is possible that the parent was added to the cache because e.g. a request was running for the same key.
+		// We should wake up the parent as well even if this item is not in cooldown.
+		RandomGrabArray rga = getParentGrabArray();
+		if(rga != null)
+			context.cooldownTracker.clearCachedWakeup(rga, false, null);
+		// If we didn't actually get queued, we should wake up the starter, for the same reason we clearCachedWakeup().
+		context.getChkFetchScheduler().wakeStarter();
 	}
 
 }

@@ -10,6 +10,7 @@ import freenet.node.SendableInsert;
 import freenet.node.SendableRequest;
 import freenet.node.SendableRequestItem;
 import freenet.node.SendableRequestSender;
+import freenet.support.RandomGrabArray;
 
 /**
  * A ChosenBlock which isn't persistent.
@@ -57,7 +58,7 @@ public class TransientChosenBlock extends ChosenBlock {
 	public void onFetchSuccess(ClientContext context) {
 		sched.succeeded((SendableGet)request, false);
 	}
-
+	
 	@Override
 	public short getPriority() {
 		return request.getPriorityClass(null);

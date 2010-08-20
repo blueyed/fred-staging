@@ -6,6 +6,7 @@ import freenet.client.FECCallback;
 import freenet.client.FECCodec;
 import freenet.client.FECJob;
 import freenet.client.FECQueue;
+import freenet.client.FetchException;
 import freenet.client.SplitfileBlock;
 import freenet.keys.CHKBlock;
 import freenet.support.LogThresholdCallback;
@@ -97,13 +98,10 @@ public class SplitFileFetcherCrossSegment implements FECCallback {
 				finishedEncoding = true;
 			}
 			if(logMINOR) Logger.minor(this, "Finished as nothing to encode/decode in onFetched on "+this);
-			if(persistent) {
-				if(bye)
-					onFinished(container, context);
-				else
-					container.store(this);
-			}
-			
+			if(bye)
+				onFinished(container, context);
+			else if(persistent)
+				container.store(this);
 		}
 	}
 
@@ -138,13 +136,27 @@ public class SplitFileFetcherCrossSegment implements FECCallback {
 					Logger.error(this, "Cannot decode/encode: Found block "+i+" : "+blockNumbers[i]+" of "+segments[i]+" but is gone now!", new Exception("error"));
 					data = seg.getBlockBucket(blockNumbers[i], container);
 					if(data == null) {
+						if(seg.isFinished(container))
+							Logger.error(this, "SEGMENT IS FINISHED ALREADY when trying to decode/encode splitfile block: "+segments[i]);
+						else if(seg.isFinishing(container))
+							Logger.error(this, "SEGMENT IS FINISHING ALREADY when trying to decode/encode splitfile block: "+segments[i]);
+						if(seg.hasBlockWrapper(blockNumbers[i]))
+							Logger.error(this, "SEGMENT HAS BLOCK WRAPPER BUT NOT BUCKET: "+seg);
 						Logger.error(this, "Cannot decode/encode: Found block "+i+" : "+blockNumbers[i]+" of "+segments[i]+" but is gone now!", new Exception("error"));
+						SplitFileFetcher fetcher = getFetcher(container);
+						if(fetcher != null) {
+							container.activate(fetcher, 1);
+							fetcher.onFailed(new FetchException(FetchException.INTERNAL_ERROR, "Cannot decode/encode cross blocks: lost a block"), container, context);
+						}
 						return false;
+					} else {
+						Logger.error(this, "Synchronization bug: got the bucket the second time?!");
 					}
 				}
-				wrapper.data = data;
+				wrapper.assertSetData(data);
 				if(persistent) container.activate(data, Integer.MAX_VALUE);
 				if(!active) container.deactivate(seg, 1);
+				if(persistent) wrapper.storeTo(container);
 			} else {
 				// wrapper has no data, we want to decode it.
 				if(i < dataBlocks) needsDecode = true;
@@ -236,7 +248,7 @@ public class SplitFileFetcherCrossSegment implements FECCallback {
 					System.out.println("Cross-segment decoded a block.");
 			}
 			if(!active) container.deactivate(seg, 1);
-			dataBlocks[i].setData(null);
+			dataBlocks[i].clearData();
 			if(persistent) container.delete(dataBlocks[i]);
 		}
 		boolean bye = false;
@@ -249,9 +261,7 @@ public class SplitFileFetcherCrossSegment implements FECCallback {
 			}
 		}
 		if(bye) {
-			if(persistent) {
-				onFinished(container, context);
-			}
+			onFinished(container, context);
 		} else {
 			// Try an encode now.
 			if(!decodeOrEncode(null, container, context)) {
@@ -261,12 +271,10 @@ public class SplitFileFetcherCrossSegment implements FECCallback {
 					finishedEncoding = true;
 				}
 				if(logMINOR) Logger.minor(this, "Finished as nothing to encode/decode in decoded segment on "+this);
-				if(persistent) {
-					if(bye)
-						onFinished(container, context);
-					else
-						container.store(this);
-				}
+				if(bye)
+					onFinished(container, context);
+				else if(persistent)
+					container.store(this);
 			}
 		}
 	}
@@ -310,11 +318,11 @@ public class SplitFileFetcherCrossSegment implements FECCallback {
 				}
 			} else {
 				// Yay we decoded a block. Tell the segment.
-				if(seg.onSuccess(data, blockNumbers[i], null, container, context, null))
+				if(seg.onSuccess(data, blockNumbers[num], null, container, context, null))
 					System.out.println("Cross segment encoded a block.");
 			}
 			if(!active) container.deactivate(seg, 1);
-			checkBlocks[i].setData(null);
+			checkBlocks[i].clearData();
 			if(persistent) container.delete(checkBlocks[i]);
 		}
 		// All done.
@@ -324,15 +332,22 @@ public class SplitFileFetcherCrossSegment implements FECCallback {
 			bye = shouldRemove;
 		}
 		if(logMINOR) Logger.minor(this, "Finished encoding on "+this);
-		if(persistent) {
-			if(bye) onFinished(container, context);
-			else
-				container.store(this);
-		}
+		if(bye) onFinished(container, context);
+		else if(persistent)
+			container.store(this);
 	}
 
 	public void onFailed(Throwable t, ObjectContainer container, ClientContext context) {
+		synchronized(this) {
+			if(finishedEncoding) {
+				Logger.error(this, "Failed but already finished, ignoring on "+this, t);
+				return;
+			}
+		}
 		Logger.error(this, "Encode or decode failed for cross segment: "+this, t);
+		SplitFileFetcher fetcher = getFetcher(container);
+		if(persistent) container.activate(fetcher, 1);
+		fetcher.onFailed(new FetchException(FetchException.INTERNAL_ERROR, t), container, context);
 	}
 
 	public void addDataBlock(SplitFileFetcherSegment seg, int blockNum) {
@@ -351,10 +366,11 @@ public class SplitFileFetcherCrossSegment implements FECCallback {
 		SplitFileFetcher fetcher = getFetcher(container);
 		if(fetcher == null) return;
 		boolean active = container.ext().isActive(fetcher);
-		if(!active) container.activate(fetcher, 1);
-		if(!fetcher.onFinishedCrossSegment(container, context, this))
-			container.store(this);
-		if(!active) container.deactivate(fetcher, 1);
+		if(persistent && !active) container.activate(fetcher, 1);
+		if(!fetcher.onFinishedCrossSegment(container, context, this)) {
+			if(persistent) container.store(this);
+		}
+		if(persistent && !active) container.deactivate(fetcher, 1);
 	}
 
 	/** Notify that the splitfile has finished. We can skip encodes and decodes if possible. */
