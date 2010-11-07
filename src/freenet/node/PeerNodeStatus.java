@@ -8,6 +8,8 @@ import java.util.Map;
 import freenet.clients.http.DarknetConnectionsToadlet;
 import freenet.io.comm.Peer;
 import freenet.io.xfer.PacketThrottle;
+import freenet.node.NodeStats.PeerLoadStats;
+import freenet.node.PeerNode.IncomingLoadSummaryStats;
 
 /**
  * Contains various status information for a {@link PeerNode}. Used e.g. in
@@ -100,6 +102,13 @@ public class PeerNodeStatus {
 	
 	private final double selectionRate;
 
+	private final long messageQueueLengthBytes;
+	
+	private final long messageQueueLengthTime;
+	// int's because that's what they are transferred as
+	
+	public final IncomingLoadSummaryStats incomingLoadStats;
+
 	PeerNodeStatus(PeerNode peerNode, boolean noHeavy) {
 		Peer p = peerNode.getPeer();
 		if(p == null) {
@@ -153,6 +162,17 @@ public class PeerNodeStatus {
 		this.isSearchable = peerNode.isRealConnection();
 		this.resendBytesSent = peerNode.getResendBytesSent();
 		this.reportedUptimePercentage = peerNode.getUptime();
+		messageQueueLengthBytes = peerNode.getMessageQueueLengthBytes();
+		messageQueueLengthTime = peerNode.getProbableSendQueueTime();
+		incomingLoadStats = peerNode.outputLoadTracker().getIncomingLoadStats();
+	}
+	
+	public long getMessageQueueLengthBytes() {
+		return messageQueueLengthBytes;
+	}
+	
+	public long getMessageQueueLengthTime() {
+		return messageQueueLengthTime;
 	}
 
 	/**

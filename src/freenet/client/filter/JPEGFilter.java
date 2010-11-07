@@ -14,6 +14,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 
 import freenet.l10n.NodeL10n;
+import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.Logger.LogLevel;
 import freenet.support.io.CountedInputStream;
@@ -41,6 +42,16 @@ public class JPEGFilter implements ContentDataFilter {
 	private static final int MARKER_RST0 = 0xD0; // First reset marker
 	private static final int MARKER_RST7 = 0xD7; // Last reset marker
 
+        private static volatile boolean logMINOR;
+	static {
+		Logger.registerLogThresholdCallback(new LogThresholdCallback(){
+			@Override
+			public void shouldUpdate(){
+				logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
+			}
+		});
+	}
+
 	JPEGFilter(boolean deleteComments, boolean deleteExif) {
 		this.deleteComments = deleteComments;
 		this.deleteExif = deleteExif;
@@ -65,26 +76,20 @@ public class JPEGFilter implements ContentDataFilter {
 	public void readFilter(InputStream input, OutputStream output, String charset, HashMap<String, String> otherParams,
 			FilterCallback cb, boolean deleteComments, boolean deleteExif)
 	throws DataFilterException, IOException {
-		boolean logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
 		CountedInputStream cis = new CountedInputStream(input);
 		DataInputStream dis = new DataInputStream(cis);
 		assertHeader(dis, soi);
-		if(output != null) output.write(soi);
+		output.write(soi);
 
-		ByteArrayOutputStream baos = null;
-		DataOutputStream dos = null;
-		if(output != null) {
-			baos = new ByteArrayOutputStream();
-			dos = new DataOutputStream(baos);
-		}
+		ByteArrayOutputStream baos = new ByteArrayOutputStream();
+		DataOutputStream dos = new DataOutputStream(baos);
 
 		// Check the chunks.
 
 		boolean finished = false;
 		int forceMarkerType = -1;
-		while(dos == null || !finished) {
-			if(baos != null)
-				baos.reset();
+		while(!finished) {
+			baos.reset();
 			int markerType;
 			if(forceMarkerType != -1) {
 				markerType = forceMarkerType;
@@ -114,7 +119,7 @@ public class JPEGFilter implements ContentDataFilter {
 				blockLength = 0;
 			else {
 				blockLength = dis.readUnsignedShort();
-				if(dos != null) dos.writeShort(blockLength);
+				dos.writeShort(blockLength);
 			}
 			if(markerType == 0xDA) {
 				// Start of scan marker
@@ -122,12 +127,9 @@ public class JPEGFilter implements ContentDataFilter {
 				// Copy marker
 				if(blockLength < 2)
 					throwError("Invalid frame length", "The file includes an invalid frame (length "+blockLength+").");
-				if(dos != null) {
-					byte[] buf = new byte[blockLength - 2];
-					dis.readFully(buf);
-					dos.write(buf);
-				} else
-					skipBytes(dis, blockLength - 2);
+				byte[] buf = new byte[blockLength - 2];
+				dis.readFully(buf);
+				dos.write(buf);
 				Logger.minor(this, "Copied start-of-frame marker length "+(blockLength-2));
 
 				if(baos != null)
@@ -170,33 +172,25 @@ public class JPEGFilter implements ContentDataFilter {
 					int majorVersion = dis.readUnsignedByte();
 					if(majorVersion != 1)
 						throwError("Invalid header", "Unrecognized major version "+majorVersion+".");
-					if(dos != null) dos.write(majorVersion);
+					dos.write(majorVersion);
 					int minorVersion = dis.readUnsignedByte();
 					if(minorVersion > 2)
 						throwError("Invalid header", "Unrecognized version 1."+minorVersion+".");
-					if(dos != null) dos.write(minorVersion);
+					dos.write(minorVersion);
 					int units = dis.readUnsignedByte();
 					if(units > 2)
 						throwError("Invalid header", "Unrecognized units type "+units+".");
-					if(dos != null) dos.write(units);
-					if(dos != null) {
-						dos.writeShort(dis.readShort()); // Copy Xdensity
-						dos.writeShort(dis.readShort()); // Copy Ydensity
-					} else {
-						dis.readShort(); // Ignore Xdensity
-						dis.readShort(); // Ignore Ydensity
-					}
+					dos.write(units);
+					dos.writeShort(dis.readShort()); // Copy Xdensity
+					dos.writeShort(dis.readShort()); // Copy Ydensity
 					int thumbX = dis.readUnsignedByte();
-					if(dos != null) dos.writeByte(thumbX);
+					dos.writeByte(thumbX);
 					int thumbY = dis.readUnsignedByte();
-					if(dos != null) dos.writeByte(thumbY);
+					dos.writeByte(thumbY);
 					int thumbLen = thumbX * thumbY * 3;
-					if(dos != null) {
-						byte[] buf = new byte[thumbLen];
-						dis.readFully(buf);
-						dos.write(buf);
-					} else 
-						skipBytes(dis, thumbLen);
+					byte[] buf = new byte[thumbLen];
+					dis.readFully(buf);
+					dos.write(buf);
 				} else if(type.equals("JFXX")) {
 					// JFIF extension marker
 					int extensionCode = dis.readUnsignedByte();
@@ -287,12 +281,9 @@ public class JPEGFilter implements ContentDataFilter {
 					// Essential, non-terminal, but unparsed frames.
 					if(blockLength < 2)
 						throwError("Invalid frame length", "The file includes an invalid frame (length "+blockLength+").");
-					if(dos != null) {
-						byte[] buf = new byte[blockLength - 2];
-						dis.readFully(buf);
-						dos.write(buf);
-					} else
-						skipBytes(dis, blockLength - 2);
+					byte[] buf = new byte[blockLength - 2];
+					dis.readFully(buf);
+					dos.write(buf);
 					Logger.minor(this, "Essential frame type "+Integer.toHexString(markerType)+" length "+(blockLength-2)+" offset at end "+cis.count());
 				} else {
 					if(markerType >= 0xE0 && markerType <= 0xEF) {
@@ -312,10 +303,8 @@ public class JPEGFilter implements ContentDataFilter {
 			if(cis.count() != countAtStart + blockLength)
 				throwError("Invalid frame", "The length of the frame is incorrect (read "+
 						(cis.count()-countAtStart)+" bytes, frame length "+blockLength+" for type "+Integer.toHexString(markerType)+").");
-			if(dos != null) {
-				// Write frame
-				baos.writeTo(output);
-			}
+			// Write frame
+			baos.writeTo(output);
 		}
 
 		// In future, maybe we will check the other chunks too.
@@ -358,13 +347,9 @@ public class JPEGFilter implements ContentDataFilter {
 		if(skip < 0)
 			throwError("Invalid "+thing, "The file includes an invalid "+thing+'.');
 		if(skip == 0) return;
-		if(dos != null) {
-			byte[] buf = new byte[skip];
-			dis.readFully(buf);
-			dos.write(buf);
-		} else {
-			skipBytes(dis, skip);
-		}
+		byte[] buf = new byte[skip];
+		dis.readFully(buf);
+		dos.write(buf);
 	}
 
 	// FIXME factor this out somewhere ... an IOUtil class maybe
@@ -396,8 +381,8 @@ public class JPEGFilter implements ContentDataFilter {
 		if(shortReason != null)
 			message += " - " + shortReason;
 		DataFilterException e = new DataFilterException(shortReason, shortReason, message);
-		if(Logger.shouldLog(LogLevel.NORMAL, this))
-			Logger.normal(this, "Throwing "+e, e);
+		if(logMINOR)
+			Logger.normal(this, "Throwing "+e.getMessage(), e);
 		throw e;
 	}
 

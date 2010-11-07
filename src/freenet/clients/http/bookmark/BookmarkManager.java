@@ -25,6 +25,7 @@ import freenet.node.FSParseException;
 import freenet.node.NodeClientCore;
 import freenet.node.RequestClient;
 import freenet.node.RequestStarter;
+import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.SimpleFieldSet;
 import freenet.support.Logger.LogLevel;
@@ -38,8 +39,8 @@ public class BookmarkManager implements RequestClient {
 	private final USKUpdatedCallback uskCB = new USKUpdatedCallback();
 	public static final BookmarkCategory MAIN_CATEGORY = new BookmarkCategory("/");
 	private final HashMap<String, Bookmark> bookmarks = new HashMap<String, Bookmark>();
-	private final File bookmarksFile = new File("bookmarks.dat").getAbsoluteFile();
-	private final File backupBookmarksFile = new File(bookmarksFile.getParentFile(), bookmarksFile.getName() + ".bak");
+	private final File bookmarksFile;
+	private final File backupBookmarksFile;
 	private boolean isSavingBookmarks = false;
 	static {
 		String name = "freenet/clients/http/staticfiles/defaultbookmarks.dat";
@@ -60,9 +61,21 @@ public class BookmarkManager implements RequestClient {
 		}
 	}
 
+        private static volatile boolean logMINOR;
+	static {
+		Logger.registerLogThresholdCallback(new LogThresholdCallback(){
+			@Override
+			public void shouldUpdate(){
+				logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
+			}
+		});
+	}
+
 	public BookmarkManager(NodeClientCore n) {
 		putPaths("/", MAIN_CATEGORY);
 		this.node = n;
+		this.bookmarksFile = n.node.userDir().file("bookmarks.dat");
+		this.backupBookmarksFile = n.node.userDir().file("bookmarks.dat.bak");
 
 		try {
 			// Read the backup file if necessary
@@ -89,12 +102,6 @@ public class BookmarkManager implements RequestClient {
 				Logger.error(this, "Error reading the backup bookmark file !" + e.getMessage(), e);
 			}
 		}
-	}
-
-	private static volatile boolean logMINOR;
-
-	static {
-		Logger.registerClass(ClientGetter.class);
 	}
 
 	public void reAddDefaultBookmarks() {
@@ -179,7 +186,7 @@ public class BookmarkManager implements RequestClient {
 	}
 
 	public void addBookmark(String parentPath, Bookmark bookmark) {
-		if(Logger.shouldLog(LogLevel.MINOR, this))
+		if(logMINOR)
 			Logger.minor(this, "Adding bookmark " + bookmark + " to " + parentPath);
 		BookmarkCategory parent = getCategoryByPath(parentPath);
 		parent.addBookmark(bookmark);

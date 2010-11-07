@@ -12,7 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
-import org.spaceroots.mantissa.random.MersenneTwister;
+import freenet.support.math.MersenneTwister;
 
 import com.db4o.ObjectContainer;
 
@@ -87,8 +87,6 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 	private boolean allSegmentsFinished;
 	/** Override length. If this is positive, truncate the splitfile to this length. */
 	private final long overrideLength;
-	/** Preferred bucket to return data in */
-	private final Bucket returnBucket;
 	private boolean finished;
 	private long token;
 	final boolean persistent;
@@ -150,7 +148,7 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 	
 	public SplitFileFetcher(Metadata metadata, GetCompletionCallback rcb, ClientRequester parent2,
 			FetchContext newCtx, boolean deleteFetchContext, List<? extends Compressor> decompressors2, ClientMetadata clientMetadata,
-			ArchiveContext actx, int recursionLevel, Bucket returnBucket, long token2, boolean topDontCompress, short topCompatibilityMode, ObjectContainer container, ClientContext context) throws FetchException, MetadataParseException {
+			ArchiveContext actx, int recursionLevel, long token2, boolean topDontCompress, short topCompatibilityMode, ObjectContainer container, ClientContext context) throws FetchException, MetadataParseException {
 		this.persistent = parent2.persistent();
 		this.deleteFetchContext = deleteFetchContext;
 		if(logMINOR)
@@ -159,7 +157,6 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 		if(hash == 0) hash = 1;
 		this.hashCode = hash;
 		this.finished = false;
-		this.returnBucket = returnBucket;
 		this.fetchContext = newCtx;
 		if(newCtx == null)
 			throw new NullPointerException();
@@ -337,7 +334,7 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 			crossSegments = new SplitFileFetcherCrossSegment[segments.length];
 			int segLen = blocksPerSegment;
 			for(int i=0;i<crossSegments.length;i++) {
-				System.out.println("Allocating blocks (on fetch) for cross segment "+i);
+				Logger.normal(this, "Allocating blocks (on fetch) for cross segment "+i);
 				if(segments.length - i == deductBlocksFromSegments) {
 					segLen--;
 				}
@@ -438,7 +435,7 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 			long sz = s.decodedLength(container);
 			length += sz;
 			if(logMINOR)
-				Logger.minor(this, "Segment "+i+" decoded length "+sz+" total length now "+length+" for "+s.dataBuckets.length+" blocks which should be "+(s.dataBuckets.length * NodeCHK.BLOCK_SIZE));
+				Logger.minor(this, "Segment "+i+" decoded length "+sz+" total length now "+length+" for "+s.dataBuckets.length+" blocks which should be "+(s.dataBuckets.length * CHKBlock.DATA_LENGTH));
 			// Healing is done by Segment
 		}
 		if(length > overrideLength) {
@@ -693,6 +690,8 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 	// It shouldn't be referred to by anything but it's good to detect such problems.
 	private boolean removed = false;
 	
+	/** Remove from the database, but only if all the cross-segments have finished.
+	 * If not, wait for them to report in. */
 	public void removeFrom(ObjectContainer container, ClientContext context) {
 		synchronized(this) {
 			toRemove = true;
@@ -723,6 +722,7 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 		innerRemoveFrom(container, context);
 	}
 	
+	/** Actually do the remove from the database. */
 	public void innerRemoveFrom(ObjectContainer container, ClientContext context) {
 		synchronized(this) {
 			if(removed) {
@@ -771,6 +771,12 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 		container.delete(this);
 	}
 
+	/** Call fetcherFinished() on all the segments. Necessary when we have cross-segment
+	 * redundancy, because we cannot free the data blocks until the cross-segment encodes
+	 * have finished.
+	 * @param container
+	 * @param context
+	 */
 	private void finishSegments(ObjectContainer container, ClientContext context) {
 		for(int i=0;i<segments.length;i++) {
 			SplitFileFetcherSegment segment = segments[i];
@@ -809,6 +815,12 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 		return true;
 	}
 
+	/** A cross-segment has completed. When all the cross-segments have completed, and 
+	 * removeFrom() has been called, we call innerRemoveFrom() to finish removing the 
+	 * fetcher from the database. If the splitfile is not persistent, we still need to 
+	 * call finishSegments() on each. 
+	 * @return True if we finished the fetcher (and removed the segment from the database
+	 * or called finishSegments()). */
 	public boolean onFinishedCrossSegment(ObjectContainer container, ClientContext context, SplitFileFetcherCrossSegment seg) {
 		boolean allGone = true;
 		for(int i=0;i<crossSegments.length;i++) {
@@ -826,7 +838,12 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 				if(!allGone) break;
 			}
 		}
-		if(!toRemove) return false;
+		synchronized(this) {
+			if(persistent && !toRemove) {
+				// Waiting for removeFrom().
+				return false;
+			}
+		}
 		if(allGone) {
 			if(persistent)
 				innerRemoveFrom(container, context);

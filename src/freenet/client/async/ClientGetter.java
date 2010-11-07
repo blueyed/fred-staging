@@ -153,7 +153,10 @@ public class ClientGetter extends BaseClientGetter {
 			// FIXME synchronization is probably unnecessary.
 			// But we DEFINITELY do not want to synchronize while calling currentState.schedule(),
 			// which can call onSuccess and thereby almost anything.
+			HashResult[] oldHashes = null;
 			synchronized(this) {
+				if(restart)
+					clearCountersOnRestart();
 				if(overrideURI != null) uri = overrideURI;
 				if(finished) {
 					if(!restart) return false;
@@ -161,9 +164,21 @@ public class ClientGetter extends BaseClientGetter {
 					cancelled = false;
 					finished = false;
 				}
+				expectedMIME = null;
+				expectedSize = 0;
+				oldHashes = hashes;
+				hashes = null;
+				finalBlocksRequired = 0;
+				finalBlocksTotal = 0;
+				resetBlocks();
 				currentState = SingleFileFetcher.create(this, this,
 						uri, ctx, actx, ctx.maxNonSplitfileRetries, 0, false, -1, true,
-						(filtering || returnBucket == null || returnBucket instanceof NullBucket) ? null : returnBucket, true, container, context);
+						true, container, context);
+			}
+			if(persistent() && oldHashes != null) {
+				for(HashResult res : oldHashes) {
+					if(res != null) res.removeFrom(container);
+				}
 			}
 			if(cancelled) cancel();
 			// schedule() may deactivate stuff, so store it now.
@@ -195,6 +210,15 @@ public class ClientGetter extends BaseClientGetter {
 		return true;
 	}
 
+	protected void clearCountersOnRestart() {
+		this.archiveRestarts = 0;
+		this.expectedMIME = null;
+		this.expectedSize = 0;
+		this.finalBlocksRequired = 0;
+		this.finalBlocksTotal = 0;
+		super.clearCountersOnRestart();
+	}
+
 	/**
 	 * Called when the request succeeds.
 	 * @param state The ClientGetState which retrieved the data.
@@ -202,8 +226,10 @@ public class ClientGetter extends BaseClientGetter {
 	public void onSuccess(StreamGenerator streamGenerator, ClientMetadata clientMetadata, List<? extends Compressor> decompressors, ClientGetState state, ObjectContainer container, ClientContext context) {
 		if(logMINOR)
 			Logger.minor(this, "Succeeded from "+state+" on "+this);
-		if(persistent())
+		if(persistent()) {
 			container.activate(uri, 5);
+			container.activate(clientMetadata, Integer.MAX_VALUE);
+		}
 		if(!closeBinaryBlobStream(container, context)) return;
 		String mimeType;
 		synchronized(this) {
@@ -244,6 +270,7 @@ public class ClientGetter extends BaseClientGetter {
 		try {
 			if(returnBucket == null) finalResult = context.getBucketFactory(persistent()).makeBucket(maxLen);
 			else finalResult = returnBucket;
+			if(logMINOR) Logger.minor(this, "Writing final data to "+finalResult+" return bucket is "+returnBucket);
 			dataOutput .connect(dataInput);
 			result = new FetchResult(clientMetadata, finalResult);
 
@@ -268,15 +295,15 @@ public class ClientGetter extends BaseClientGetter {
 				throw e;
 			}
 
-			if(logMINOR) Logger.minor(this, "Size of written data: "+result.asBucket().size());
+			// An error will propagate backwards, so wait for the worker first.
+			
+			if(logMINOR) Logger.minor(this, "Waiting for hashing, filtration, and writing to finish");
+			worker.waitFinished();
 
 			if(decompressorManager != null) {
 				if(logMINOR) Logger.minor(this, "Waiting for decompression to finalize");
 				decompressorManager.waitFinished();
 			}
-
-			if(logMINOR) Logger.minor(this, "Waiting for hashing, filtration, and writing to finish");
-			worker.waitFinished();
 
 			if(worker.getClientMetadata() != null) {
 				clientMetadata = worker.getClientMetadata();
@@ -593,6 +620,7 @@ public class ClientGetter extends BaseClientGetter {
 	 * @throws FetchException If something went wrong.
 	 */
 	public boolean restart(FreenetURI redirect, boolean filterData, ObjectContainer container, ClientContext context) throws FetchException {
+		checkForBrokenClient(container, context);
 		if(persistent()) {
 			container.activate(ctx, 1);
 			container.activate(ctx.filterData, 1);

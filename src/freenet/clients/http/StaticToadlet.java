@@ -76,7 +76,6 @@ public class StaticToadlet extends Toadlet {
 		ctx.sendReplyHeaders(200, "OK", headers, DefaultMIMETypes.guessMIMEType(path, false), data.size(), mTime);
 
 		ctx.writeData(data);
-		data.free();
 	}
 	
 	/**

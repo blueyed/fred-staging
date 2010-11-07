@@ -217,7 +217,7 @@ public class USKManager implements RequestClient {
 				schedulePrefetchChecker();
 			}
 			temporaryBackgroundFetchersLRU.push(clear, f);
-			while(temporaryBackgroundFetchersLRU.size() > NodeClientCore.maxBackgroundUSKFetchers) {
+			while(temporaryBackgroundFetchersLRU.size() > NodeClientCore.getMaxBackgroundUSKFetchers()) {
 				USKFetcher fetcher = temporaryBackgroundFetchersLRU.popValue();
 				temporaryBackgroundFetchersPrefetch.remove(fetcher.getOriginalUSK().clearCopy());
 				if(!fetcher.hasSubscribers()) {
@@ -450,7 +450,6 @@ public class USKManager implements RequestClient {
 	
 	public void unsubscribe(USK origUSK, USKCallback cb) {
 		USKFetcher toCancel = null;
-		USKFetcher toCancelAlt = null;
 		synchronized(this) {
 			USK clear = origUSK.clearCopy();
 			USKCallback[] callbacks = subscribersByClearUSK.get(clear);
@@ -468,7 +467,7 @@ public class USKManager implements RequestClient {
 			USKCallback[] newCallbacks = new USKCallback[j];
 			System.arraycopy(callbacks, 0, newCallbacks, 0, j);
 			if(newCallbacks.length > 0)
-				subscribersByClearUSK.put(clear, callbacks);
+				subscribersByClearUSK.put(clear, newCallbacks);
 			else{
 				subscribersByClearUSK.remove(clear);
 			}
@@ -484,7 +483,6 @@ public class USKManager implements RequestClient {
 			// They do not care about callbacks.
 		}
 		if(toCancel != null) toCancel.cancel(null, context);
-		if(toCancelAlt != null) toCancelAlt.cancel(null, context);
 	}
 	
 	/**

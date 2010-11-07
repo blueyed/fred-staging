@@ -31,12 +31,9 @@ import freenet.node.RequestStarter;
 import freenet.node.SendableGet;
 import freenet.node.SendableInsert;
 import freenet.node.SendableRequest;
-import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.PrioritizedSerialExecutor;
-import freenet.support.RandomGrabArray;
 import freenet.support.TimeUtil;
-import freenet.support.Logger.LogLevel;
 import freenet.support.api.StringCallback;
 import freenet.support.io.NativeThread;
 
@@ -52,15 +49,10 @@ public class ClientRequestScheduler implements RequestScheduler {
 	private final transient ClientRequestSelector selector;
 	
 	private static volatile boolean logMINOR;
+        private static volatile boolean logDEBUG;
 	
 	static {
-		Logger.registerLogThresholdCallback(new LogThresholdCallback() {
-			
-			@Override
-			public void shouldUpdate() {
-				logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
-			}
-		});
+		Logger.registerClass(ClientRequestScheduler.class);
 	}
 	
 	public static class PrioritySchedulerCallback extends StringCallback implements EnumerableOptionCallback {
@@ -233,6 +225,7 @@ public class ClientRequestScheduler implements RequestScheduler {
 								return true;
 							}
 							
+                                                        @Override
 							public String toString() {
 								return "registerInsert";
 							}
@@ -433,7 +426,7 @@ public class ClientRequestScheduler implements RequestScheduler {
 		// We *DO* need to call clearCooldown here because it only becomes runnable for persistent requests after it has been removed from starterQueue.
 		boolean active = container.ext().isActive(request);
 		if(!active) container.activate(request, 1);
-		request.clearCooldown(container, clientContext);
+		request.clearCooldown(container, clientContext, false);
 		if(!active) container.deactivate(request, 1);
 	}
 	
@@ -462,13 +455,13 @@ public class ClientRequestScheduler implements RequestScheduler {
 	static final int WARNING_STARTER_QUEUE_SIZE = 800;
 	private static final long WAIT_AFTER_NOTHING_TO_START = 60*1000;
 	
-	private transient LinkedList<PersistentChosenRequest> starterQueue = new LinkedList<PersistentChosenRequest>();
+	private final transient LinkedList<PersistentChosenRequest> starterQueue = new LinkedList<PersistentChosenRequest>();
 	
 	/**
 	 * Called by RequestStarter to find a request to run.
 	 */
 	public ChosenBlock grabRequest() {
-		boolean logDEBUG = Logger.shouldLog(LogLevel.DEBUG, this);
+		boolean needsRefill = true;
 		while(true) {
 			PersistentChosenRequest reqGroup = null;
 			synchronized(starterQueue) {
@@ -501,11 +494,11 @@ public class ClientRequestScheduler implements RequestScheduler {
 				return getBetterNonPersistentRequest(Short.MAX_VALUE);
 			}
 			ChosenBlock block;
-			int finalLength = 0;
 			synchronized(starterQueue) {
 				block = reqGroup.grabNotStarted(clientContext.fastWeakRandom, this);
 				if(block == null) {
 					if(logMINOR) Logger.minor(this, "No block found on "+reqGroup);
+					int finalLength = 0;
 					for(int i=0;i<starterQueue.size();i++) {
 						if(starterQueue.get(i) == reqGroup) {
 							starterQueue.remove(i);
@@ -516,6 +509,7 @@ public class ClientRequestScheduler implements RequestScheduler {
 							finalLength += starterQueue.get(i).sizeNotStarted();
 						}
 					}
+					needsRefill = finalLength < MAX_STARTER_QUEUE_SIZE;
 					continue;
 				} else {
 					// Prevent this request being selected, even though we may remove the PCR from the starter queue
@@ -524,7 +518,7 @@ public class ClientRequestScheduler implements RequestScheduler {
 						runningPersistentRequests.add(reqGroup.request);
 				}
 			}
-			if(finalLength < MAX_STARTER_QUEUE_SIZE)
+			if(needsRefill)
 				queueFillRequestStarterQueue();
 			if(logMINOR)
 				Logger.minor(this, "grabRequest() returning "+block+" for "+reqGroup);
@@ -633,6 +627,7 @@ public class ClientRequestScheduler implements RequestScheduler {
 			fillRequestStarterQueue(container, context);
 			return false;
 		}
+        @Override
 		public String toString() {
 			return "fillRequestStarterQueue";
 		}
@@ -755,7 +750,6 @@ public class ClientRequestScheduler implements RequestScheduler {
 		short prio = req.getPriorityClass(container);
 		if(logMINOR)
 			Logger.minor(this, "Maybe adding to starter queue: prio="+prio);
-		boolean logDEBUG = Logger.shouldLog(LogLevel.DEBUG, this);
 		synchronized(starterQueue) {
 			boolean betterThanSome = false;
 			int size = 0;
@@ -901,6 +895,7 @@ public class ClientRequestScheduler implements RequestScheduler {
 						container.deactivate(succeeded, 1);
 						return false;
 					}
+                                        @Override
 					public String toString() {
 						return "BaseSendableGet succeeded";
 					}
@@ -932,6 +927,7 @@ public class ClientRequestScheduler implements RequestScheduler {
 						schedCore.tripPendingKey(key, block, container, clientContext);
 						return false;
 					}
+                                        @Override
 					public String toString() {
 						return "tripPendingKey";
 					}
@@ -1058,7 +1054,7 @@ public class ClientRequestScheduler implements RequestScheduler {
 	public void removeTransientInsertFetching(SendableInsert insert, Object token) {
 		selector.removeTransientInsertFetching(insert, token);
 		// Must remove here, because blocks selection and therefore creates cooldown cache entries.
-		insert.clearCooldown(null, clientContext);
+		insert.clearCooldown(null, clientContext, false);
 	}
 	
 	public void callFailure(final SendableGet get, final LowLevelGetException e, int prio, boolean persistent) {
@@ -1076,6 +1072,7 @@ public class ClientRequestScheduler implements RequestScheduler {
 						container.deactivate(get, 1);
 						return false;
 					}
+                                        @Override
 					public String toString() {
 						return "SendableGet onFailure";
 					}
@@ -1102,6 +1099,7 @@ public class ClientRequestScheduler implements RequestScheduler {
 						container.deactivate(insert, 1);
 						return false;
 					}
+                                        @Override
 					public String toString() {
 						return "SendableInsert onFailure";
 					}

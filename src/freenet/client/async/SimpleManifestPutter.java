@@ -29,7 +29,6 @@ import freenet.client.ArchiveManager.ARCHIVE_TYPE;
 import freenet.client.events.SplitfileProgressEvent;
 import freenet.keys.BaseClientKey;
 import freenet.keys.FreenetURI;
-import freenet.keys.InsertableClientSSK;
 import freenet.keys.Key;
 import freenet.node.RequestClient;
 import freenet.support.LogThresholdCallback;
@@ -132,7 +131,7 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 
 		@Override
 		public void cancel(ObjectContainer container, ClientContext context) {
-			if(Logger.shouldLog(LogLevel.MINOR, this))
+			if(logMINOR)
 				Logger.minor(this, "Cancelling "+this, new Exception("debug"));
 			ClientPutState oldState = null;
 			synchronized(this) {
@@ -732,7 +731,7 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 				HashMap<String,Object> subMap = new HashMap<String,Object>();
 				putHandlersByName.put(name, subMap);
 				makePutHandlers(Metadata.forceMap(o), subMap, ZipPrefix+name+ '/', persistent);
-				if(Logger.shouldLog(LogLevel.DEBUG, this))
+				if(logDEBUG)
 					Logger.debug(this, "Sub map for "+name+" : "+subMap.size()+" elements from "+((HashMap)o).size());
 			} else {
 				ManifestElement element = (ManifestElement) o;
@@ -956,9 +955,14 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 				Bucket outputBucket = context.getBucketFactory(persistent()).makeBucket(baseMetadata.dataLength());
 				// TODO: try both ? - maybe not worth it
 				archiveType = ARCHIVE_TYPE.getDefault();
+				OutputStream os = new BufferedOutputStream(outputBucket.getOutputStream());
 				String mimeType = (archiveType == ARCHIVE_TYPE.TAR ?
-					createTarBucket(bucket, outputBucket, container) :
-					createZipBucket(bucket, outputBucket, container));
+					createTarBucket(bucket, os, container) :
+					createZipBucket(bucket, os, container));
+				os.flush();
+				os.close();
+				if(logMINOR)
+					Logger.minor(this, "Archive size is "+outputBucket.size());
 				bucket.free();
 				if(persistent()) bucket.removeFrom(container);
 
@@ -1003,7 +1007,7 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 				container.deactivate(baseMetadata, 1);
 
 			}
-			metadataInserter.start(null, container, context);
+			metadataInserter.start(container, context);
 		} catch (InsertException e) {
 			fail(e, container, context);
 			return;
@@ -1014,10 +1018,9 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 		}
 	}
 
-	private String createTarBucket(Bucket inputBucket, Bucket outputBucket, ObjectContainer container) throws IOException {
+	private String createTarBucket(Bucket inputBucket, OutputStream os, ObjectContainer container) throws IOException {
 		if(logMINOR) Logger.minor(this, "Create a TAR Bucket");
 
-		OutputStream os = new BufferedOutputStream(outputBucket.getOutputStream());
 		TarOutputStream tarOS = new TarOutputStream(os);
 		tarOS.setLongFileMode(TarOutputStream.LONGFILE_GNU);
 		TarEntry ze;
@@ -1051,19 +1054,13 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 		tarOS.closeEntry();
 		// Both finish() and close() are necessary.
 		tarOS.finish();
-		tarOS.flush();
-		tarOS.close();
-
-		if(logMINOR)
-			Logger.minor(this, "Archive size is "+outputBucket.size());
 
 		return ARCHIVE_TYPE.TAR.mimeTypes[0];
 	}
 
-	private String createZipBucket(Bucket inputBucket, Bucket outputBucket, ObjectContainer container) throws IOException {
+	private String createZipBucket(Bucket inputBucket, OutputStream os, ObjectContainer container) throws IOException {
 		if(logMINOR) Logger.minor(this, "Create a ZIP Bucket");
 
-		OutputStream os = new BufferedOutputStream(outputBucket.getOutputStream());
 		ZipOutputStream zos = new ZipOutputStream(os);
 		ZipEntry ze;
 
@@ -1089,8 +1086,6 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 		zos.closeEntry();
 		// Both finish() and close() are necessary.
 		zos.finish();
-		zos.flush();
-		zos.close();
 
 		return ARCHIVE_TYPE.ZIP.mimeTypes[0];
 	}
@@ -1135,7 +1130,7 @@ public class SimpleManifestPutter extends BaseClientPutter implements PutComplet
 				synchronized(this) {
 					this.metadataPuttersByMetadata.put(m, metadataInserter);
 				}
-				metadataInserter.start(null, container, context);
+				metadataInserter.start(container, context);
 				if(persistent()) {
 					container.deactivate(metadataInserter, 1);
 					container.deactivate(m, 1);

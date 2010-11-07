@@ -42,6 +42,7 @@ import freenet.support.api.Bucket;
 public class PersistentBlobTempBucketFactory {
 	
 	private static volatile boolean logMINOR;
+	private static volatile boolean logDEBUG;
 	
 	static {
 		Logger.registerLogThresholdCallback(new LogThresholdCallback() {
@@ -49,6 +50,7 @@ public class PersistentBlobTempBucketFactory {
 			@Override
 			public void shouldUpdate() {
 				logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
+				logDEBUG = Logger.shouldLog(LogLevel.DEBUG, this);
 			}
 		});
 	}
@@ -119,7 +121,7 @@ public class PersistentBlobTempBucketFactory {
 		
 		// Diagnostics
 		
-		if(logMINOR)
+		if(logDEBUG)
 			initRangeDump(container);
 	}
 	
@@ -265,7 +267,7 @@ public class PersistentBlobTempBucketFactory {
 			if(inDB < ptr) {
 				Logger.error(this, "Tags in database: "+inDB+" but size of file allows: "+ptr);
 				// Recover: exhaustive index search. This can cause very long pauses, but should only happen if there is a bug.
-				for(long l = 0; l < ptr; l++) {
+				for(long l = ptr-1; l >= 0; l--) {
 					synchronized(this) {
 						if(freeSlots.containsKey(l)) continue;
 						if(notCommittedBlobs.containsKey(l)) continue;
@@ -285,6 +287,7 @@ public class PersistentBlobTempBucketFactory {
 					added++;
 					changedTags = true;
 					if(added > MAX_FREE) return true;
+					if(l + added == ptr) break;
 				}
 			}
 			

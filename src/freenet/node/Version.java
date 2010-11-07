@@ -7,6 +7,7 @@ import java.util.Calendar;
 import java.util.TimeZone;
 
 import freenet.support.Fields;
+import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.Logger.LogLevel;
 
@@ -49,18 +50,30 @@ public class Version {
 	public static final String protocolVersion = "1.0";
 
 	/** The build number of the current revision */
-	private static final int buildNumber = 1272;
+	private static final int buildNumber = 1299;
 
 	/** Oldest build of Fred we will talk to */
-	private static final int oldLastGoodBuild = 1271;
-	private static final int newLastGoodBuild = 1272;
+	private static final int oldLastGoodBuild = 1296;
+	private static final int newLastGoodBuild = 1298;
 	static final long transitionTime;
 
 	static {
 		final Calendar _cal = Calendar.getInstance(TimeZone.getTimeZone("GMT"));
 		// year, month - 1 (or constant), day, hour, minute, second
-		_cal.set( 2010, Calendar.AUGUST, 26, 0, 0, 0 );
+		_cal.set( 2010, Calendar.NOVEMBER, 8, 0, 0, 0 );
 		transitionTime = _cal.getTimeInMillis();
+	}
+
+        private static volatile boolean logMINOR;
+        private static volatile boolean logDEBUG;
+	static {
+		Logger.registerLogThresholdCallback(new LogThresholdCallback(){
+			@Override
+			public void shouldUpdate(){
+				logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
+                                logDEBUG = Logger.shouldLog(LogLevel.DEBUG, this);
+			}
+		});
 	}
 
 	/**
@@ -106,7 +119,7 @@ public class Version {
 	}
 
 	/** The highest reported build of fred */
-	public static int highestSeenBuild = buildNumber;
+	private static int highestSeenBuild = buildNumber;
 
 	/** The current stable tree version */
 	public static final String stableNodeVersion = "0.7";
@@ -126,8 +139,6 @@ public class Version {
 	public static final String cvsRevision() {
 		return cvsRevision;
 	}
-
-	private static boolean logDEBUG = Logger.shouldLog(LogLevel.DEBUG,Version.class);
 
 	/**
 	 * @return the node's version designators as an array
@@ -202,7 +213,7 @@ public class Version {
 					return false;
 				}
 			} catch (NumberFormatException e) {
-				if(Logger.shouldLog(LogLevel.MINOR, Version.class))
+				if(logMINOR)
 					Logger.minor(Version.class,
 							"Not accepting (" + e + ") from " + version);
 				return false;
@@ -273,7 +284,7 @@ public class Version {
 					return false;
 				}
 			} catch (NumberFormatException e) {
-				if(Logger.shouldLog(LogLevel.MINOR, Version.class))
+				if(logMINOR)
 					Logger.minor(Version.class,
 							"Not accepting (" + e + ") from " + version + " and/or " + lastGoodVersion);
 				return false;
@@ -388,7 +399,7 @@ public class Version {
 				return;
 			}
 			if (buildNo > highestSeenBuild) {
-				if (Logger.shouldLog(LogLevel.MINOR, Version.class)) {
+				if (logMINOR) {
 					Logger.minor(
 						Version.class,
 						"New highest seen build: " + buildNo);
@@ -396,6 +407,10 @@ public class Version {
 				highestSeenBuild = buildNo;
 			}
 		}
+	}
+	
+	public static final int getHighestSeenBuild() {
+		return highestSeenBuild;
 	}
 
 	/**

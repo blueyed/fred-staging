@@ -136,7 +136,7 @@ public class SplitFileFetcherSegmentGet extends SendableGet implements SupportsB
 		}
 		boolean forceFatal = false;
 		if(parent.isCancelled()) {
-			if(Logger.shouldLog(LogLevel.MINOR, this)) 
+			if(logMINOR)
 				Logger.minor(this, "Failing: cancelled");
 			e = new FetchException(FetchException.CANCELLED);
 			forceFatal = true;
@@ -211,13 +211,6 @@ public class SplitFileFetcherSegmentGet extends SendableGet implements SupportsB
 			if(persistent) container.activate(blocks, 1);
 			return blocks;
 		} else return null;
-	}
-
-	@Override
-	public boolean hasValidKeys(KeysFetchingLocally fetching,
-			ObjectContainer container, ClientContext context) {
-		if(persistent) container.activate(segment, 1);
-		return segment.hasValidKeys(this, fetching, container, context);
 	}
 
 	@Override
@@ -326,7 +319,7 @@ public class SplitFileFetcherSegmentGet extends SendableGet implements SupportsB
         	container.activate(segment.errors, 1);
         }
         if(parent.isCancelled()) {
-                if(Logger.shouldLog(LogLevel.MINOR, this))
+                if(logMINOR)
                         Logger.minor(this, "Failing: cancelled");
                 // Fail the segment.
                 segment.fail(new FetchException(FetchException.CANCELLED), container, context, false);

@@ -9,6 +9,7 @@ import java.util.Vector;
 
 import freenet.client.filter.GenericReadFilterCallback;
 import freenet.io.AddressTracker;
+import freenet.io.AddressTracker.Status;
 import freenet.io.comm.FreenetInetAddress;
 import freenet.io.comm.Peer;
 import freenet.l10n.NodeL10n;
@@ -63,12 +64,12 @@ public class IPDetectorPluginManager implements ForwardPortCallback {
 			String keySuffix = maybeForwarded ? "MaybeForwarded" : "NotForwarded";
 			if(portsNotForwarded.length == 1) {
 				NodeL10n.getBase().addL10nSubstitution(div, "IPDetectorPluginManager.forwardPort"+keySuffix, 
-						new String[] { "port", "link", "/link" }, 
-						new String[] { Integer.toString(Math.abs(portsNotForwarded[0])), "<a href=\""+url+"\">", "</a>" });
+						new String[] { "port", "link" }, 
+						new HTMLNode[] { HTMLNode.text(Math.abs(portsNotForwarded[0])), HTMLNode.link(url) }); 
 			} else if(portsNotForwarded.length == 2) {
 				NodeL10n.getBase().addL10nSubstitution(div, "IPDetectorPluginManager.forwardTwoPorts"+keySuffix, 
-						new String[] { "port1", "port2", "link", "/link" }, 
-						new String[] { Integer.toString(Math.abs(portsNotForwarded[0])), Integer.toString(Math.abs(portsNotForwarded[1])), "<a href=\""+url+"\">", "</a>" });
+						new String[] { "port1", "port2", "link" }, 
+						new HTMLNode[] { HTMLNode.text(Math.abs(portsNotForwarded[0])), HTMLNode.text(Math.abs(portsNotForwarded[1])), HTMLNode.link(url) });
 			} else {
 				Logger.error(this, "Unknown number of ports to forward: "+portsNotForwarded.length);
 			}
@@ -194,11 +195,11 @@ public class IPDetectorPluginManager implements ForwardPortCallback {
 			div.addChild("#", super.getText());
 			if(suggestPortForward) {
 				if(portsNotForwarded.length == 1) {
-					NodeL10n.getBase().addL10nSubstitution(div, "IPDetectorPluginManager.suggestForwardPortWithLink", new String[] { "link", "/link", "port" },
-							new String[] { "<a href=\"/?_CHECKED_HTTP_=http://wiki.freenetproject.org/FirewallAndRouterIssues\">", "</a>", Integer.toString(portsNotForwarded[0]) });
+					NodeL10n.getBase().addL10nSubstitution(div, "IPDetectorPluginManager.suggestForwardPortWithLink", new String[] { "link", "port" },
+							new HTMLNode[] { HTMLNode.link("/?_CHECKED_HTTP_=http://wiki.freenetproject.org/FirewallAndRouterIssues"), HTMLNode.text(portsNotForwarded[0])});
 				} else {
-					NodeL10n.getBase().addL10nSubstitution(div, "IPDetectorPluginManager.suggestForwardTwoPortsWithLink", new String[] { "link", "/link", "port1", "port2" },
-							new String[] { "<a href=\"/?_CHECKED_HTTP_=http://wiki.freenetproject.org/FirewallAndRouterIssues\">", "</a>", Integer.toString(portsNotForwarded[0]), Integer.toString(portsNotForwarded[1]) });
+					NodeL10n.getBase().addL10nSubstitution(div, "IPDetectorPluginManager.suggestForwardTwoPortsWithLink", new String[] { "link", "port1", "port2" },
+							new HTMLNode[] { HTMLNode.link("/?_CHECKED_HTTP_=http://wiki.freenetproject.org/FirewallAndRouterIssues"), HTMLNode.text(portsNotForwarded[0]), HTMLNode.text(portsNotForwarded[1]) });
 				}
 			}
 			return div;
@@ -283,20 +284,20 @@ public class IPDetectorPluginManager implements ForwardPortCallback {
 	 */
 	public int[] getUDPPortsNotForwarded() {
 		OpennetManager om = node.getOpennet();
-		int darknetStatus = (node.peers.anyDarknetPeers() ? node.darknetCrypto.getDetectedConnectivityStatus() : AddressTracker.DONT_KNOW);
-		int opennetStatus = om == null ? AddressTracker.DONT_KNOW : om.crypto.getDetectedConnectivityStatus();
-		if(om == null || opennetStatus >= AddressTracker.DONT_KNOW) {
-			if(darknetStatus >= AddressTracker.DONT_KNOW) {
+		Status darknetStatus = (node.peers.anyDarknetPeers() ? node.darknetCrypto.getDetectedConnectivityStatus() : AddressTracker.Status.DONT_KNOW);
+		Status opennetStatus = om == null ? Status.DONT_KNOW : om.crypto.getDetectedConnectivityStatus();
+		if(om == null || opennetStatus.ordinal() >= AddressTracker.Status.DONT_KNOW.ordinal()) {
+			if(darknetStatus.ordinal() >= AddressTracker.Status.DONT_KNOW.ordinal()) {
 				return new int[] { };
 			} else {
-				return new int[] { (darknetStatus < AddressTracker.MAYBE_NATED ? -1 : 1) * node.getDarknetPortNumber() };
+				return new int[] { (darknetStatus.ordinal() < AddressTracker.Status.MAYBE_NATED.ordinal() ? -1 : 1) * node.getDarknetPortNumber() };
 			}
 		} else {
-			if(darknetStatus >= AddressTracker.DONT_KNOW) {
-				return new int[] { (opennetStatus < AddressTracker.MAYBE_NATED ? -1 : 1 ) * om.crypto.portNumber };
+			if(darknetStatus.ordinal() >= AddressTracker.Status.DONT_KNOW.ordinal()) {
+				return new int[] { (opennetStatus.ordinal() < AddressTracker.Status.MAYBE_NATED.ordinal() ? -1 : 1 ) * om.crypto.portNumber };
 			} else {
-				return new int[] { ((darknetStatus < AddressTracker.MAYBE_NATED) ? -1 : 1 ) * node.getDarknetPortNumber(), 
-						(opennetStatus < AddressTracker.MAYBE_NATED ? -1 : 1 ) * om.crypto.portNumber };
+				return new int[] { ((darknetStatus.ordinal() < AddressTracker.Status.MAYBE_NATED.ordinal()) ? -1 : 1 ) * node.getDarknetPortNumber(), 
+						(opennetStatus.ordinal() < AddressTracker.Status.MAYBE_NATED.ordinal() ? -1 : 1 ) * om.crypto.portNumber };
 			}
 		}
 	}

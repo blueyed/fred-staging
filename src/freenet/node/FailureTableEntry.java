@@ -1,6 +1,3 @@
-/**
- * 
- */
 package freenet.node;
 
 import java.lang.ref.WeakReference;
@@ -11,6 +8,21 @@ import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.Logger.LogLevel;
 
+/** Tracks recent requests for a specific key. If we have recently routed to a specific 
+ * node, and failed, we should not route to it again, unless it is at a higher HTL. 
+ * Different failures cause different timeouts. Similarly we track the nodes that have
+ * requested the key, because for both sets of nodes, when we find the data we offer them
+ * it; this greatly improves latency and efficiency for polling-based tools. For nodes
+ * we have routed to, we keep up to HTL separate entries; for nodes we have received 
+ * requests from, we keep only one entry.
+ * 
+ * SECURITY: All this could be a security risk if not regularly cleared - which it is,
+ * of course: We forget about either kind of node after a fixed period, in 
+ * cleanupRequested(), which the FailureTable calls regularly. Against a near-omnipotent 
+ * attacker able to compromise nodes at will of course it is still a security risk to 
+ * track anything but we have bigger problems at that level.
+ * @author toad
+ */
 class FailureTableEntry implements TimedOutNodesList {
 	
 	/** The key */
@@ -89,7 +101,7 @@ class FailureTableEntry implements TimedOutNodesList {
 		if(logMINOR) {
 			Logger.minor(this, "Failed sending request to "+routedTo.shortToString()+" : timeout "+timeout);
 		}
-		int idx = addRequestedFrom(routedTo, now);
+		int idx = addRequestedFrom(routedTo, htl, now);
 		long curTimeoutTime = requestedTimeouts[idx];
 		long newTimeoutTime = now +  timeout;
 		// FIXME htl???
@@ -122,8 +134,8 @@ class FailureTableEntry implements TimedOutNodesList {
 				requestorHTLs[i] = origHTL;
 				ret = i;
 				break;
-			} else if(got != null && got.getBootID() != requestorBootIDs[i] ||
-					now - requestorTimes[i] > MAX_TIME_BETWEEN_REQUEST_AND_OFFER) {
+			} else if(got != null && 
+					(got.getBootID() != requestorBootIDs[i] || now - requestorTimes[i] > MAX_TIME_BETWEEN_REQUEST_AND_OFFER)) {
 				requestorNodes[i] = null;
 				got = null;
 			}
@@ -197,7 +209,14 @@ class FailureTableEntry implements TimedOutNodesList {
 		return ret;
 	}
 
-	private synchronized int addRequestedFrom(PeerNode requestedFrom, long now) {
+	/** Add a requested from entry to the node. If there already is one reuse it but only
+	 * if the HTL matches. Return the index so we can update timeouts etc.
+	 * @param requestedFrom The node we have routed the request to.
+	 * @param htl The HTL at which the request was sent.
+	 * @param now The current time.
+	 * @return The index of the new or old entry.
+	 */
+	private synchronized int addRequestedFrom(PeerNode requestedFrom, short htl, long now) {
 		if(logMINOR) Logger.minor(this, "Adding requested from: "+requestedFrom+" at "+now);
 		sentTime = now;
 		boolean includedAlready = false;
@@ -205,6 +224,17 @@ class FailureTableEntry implements TimedOutNodesList {
 		int ret = -1;
 		for(int i=0;i<requestedNodes.length;i++) {
 			PeerNode got = requestedNodes[i] == null ? null : requestedNodes[i].get();
+			if(got == requestedFrom && (requestedTimeouts[i] == -1 || requestedTimeoutHTLs[i] == htl)) {
+				includedAlready = true;
+				requestedLocs[i] = requestedFrom.getLocation();
+				requestedBootIDs[i] = requestedFrom.getBootID();
+				requestedTimes[i] = now;
+				ret = i;
+			} else if(got != null && 
+					(got.getBootID() != requestedBootIDs[i] || now - requestedTimes[i] > MAX_TIME_BETWEEN_REQUEST_AND_OFFER)) {
+				requestedNodes[i] = null;
+				got = null;
+			}
 			if(got == null)
 				nulls++;
 		}

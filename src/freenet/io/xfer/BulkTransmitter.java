@@ -15,7 +15,9 @@ import freenet.io.comm.PeerContext;
 import freenet.io.comm.PeerRestartedException;
 import freenet.node.SyncSendWaitedTooLongException;
 import freenet.support.BitArray;
+import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
+import freenet.support.TimeUtil;
 import freenet.support.Logger.LogLevel;
 
 /**
@@ -51,6 +53,18 @@ public class BulkTransmitter {
 	private String cancelReason;
 	private final ByteCounter ctr;
 	
+	private static long transfersCompleted;
+	private static long transfersSucceeded;
+
+        private static volatile boolean logMINOR;
+	static {
+		Logger.registerLogThresholdCallback(new LogThresholdCallback(){
+			@Override
+			public void shouldUpdate(){
+				logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
+			}
+		});
+	}
 	/**
 	 * Create a bulk data transmitter.
 	 * @param prb The PartiallyReceivedBulk containing the file we want to send, or the part of it that we have so far.
@@ -99,7 +113,7 @@ public class BulkTransmitter {
 						public void onRestarted(PeerContext ctx) {
 							// Ignore
 						}
-			});
+			}, ctr);
 			prb.usm.addAsyncFilter(MessageFilter.create().setNoTimeout().setSource(peer).setType(DMT.FNPBulkReceivedAll).setField(DMT.UID, uid),
 					new AsyncMessageFilterCallback() {
 						public void onMatched(Message m) {
@@ -122,7 +136,7 @@ public class BulkTransmitter {
 						public void onRestarted(PeerContext ctx) {
 							// Ignore
 						}
-			});
+			}, ctr);
 		} catch (DisconnectedException e) {
 			cancel("Disconnected");
 			throw e;
@@ -164,26 +178,35 @@ public class BulkTransmitter {
 	}
 
 	public void cancel(String reason) {
-		if(Logger.shouldLog(LogLevel.MINOR, this))
+		if(logMINOR)
 			Logger.minor(this, "Cancelling "+this);
 		sendAbortedMessage();
 		synchronized(this) {
+			if(cancelled || finished) return;
 			cancelled = true;
 			cancelReason = reason;
 			notifyAll();
 		}
 		prb.remove(this);
+		synchronized(BulkTransmitter.class) {
+			transfersCompleted++;
+		}
 	}
 
 	/** Like cancel(), but without the negative overtones: The client says it's got everything,
 	 * we believe them (even if we haven't sent everything; maybe they had a partial). */
 	public void completed() {
 		synchronized(this) {
+			if(cancelled || finished) return;
 			finished = true;
 			finishTime = System.currentTimeMillis();
 			notifyAll();
 		}
 		prb.remove(this);
+		synchronized(BulkTransmitter.class) {
+			transfersCompleted++;
+			transfersSucceeded++;
+		}
 	}
 	
 	/**
@@ -191,7 +214,6 @@ public class BulkTransmitter {
 	 * @return True if the file was successfully sent. False otherwise.
 	 */
 	public boolean send() {
-		boolean logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
 		long lastSentPacket = System.currentTimeMillis();
 outer:	while(true) {
 			if(prb.isAborted()) {
@@ -227,7 +249,7 @@ outer:	while(true) {
 							cancel("Packet send failed");
 							return false;
 						}
-						if(Logger.shouldLog(LogLevel.MINOR, this))
+						if(logMINOR)
 							Logger.minor(this, "Waiting for packets: remaining: "+inFlightPackets);
 						if(inFlightPackets == 0) break;
 						try {
@@ -287,7 +309,8 @@ outer:	while(true) {
 					Logger.minor(this, "Canclled: not connected "+this);
 				return false;
 			} catch (WaitedTooLongException e) {
-				Logger.error(this, "Failed to send bulk packet "+blockNo+" for "+this);
+				long rtt = peer.getThrottle().getRoundTripTime();
+				Logger.error(this, "Failed to send bulk packet "+blockNo+" for "+this+" RTT is "+TimeUtil.formatTime(rtt));
 				return false;
 			} catch (SyncSendWaitedTooLongException e) {
 				// Impossible
@@ -323,12 +346,12 @@ outer:	while(true) {
 				if(failed) {
 					failedPacket = true;
 					BulkTransmitter.this.notifyAll();
-					if(Logger.shouldLog(LogLevel.MINOR, this)) Logger.minor(this, "Packet failed for "+BulkTransmitter.this);
+					if(logMINOR) Logger.minor(this, "Packet failed for "+BulkTransmitter.this);
 				} else {
 					inFlightPackets--;
 					if(inFlightPackets <= 0)
 						BulkTransmitter.this.notifyAll();
-					if(Logger.shouldLog(LogLevel.MINOR, this)) Logger.minor(this, "Packet sent "+BulkTransmitter.this+" remaining in flight: "+inFlightPackets);
+					if(logMINOR) Logger.minor(this, "Packet sent "+BulkTransmitter.this+" remaining in flight: "+inFlightPackets);
 				}
 			}
 		}
@@ -354,5 +377,9 @@ outer:	while(true) {
 	
 	public String getCancelReason() {
 		return cancelReason;
+	}
+	
+	public static synchronized long[] transferSuccess() {
+		return new long[] { transfersCompleted, transfersSucceeded };
 	}
 }

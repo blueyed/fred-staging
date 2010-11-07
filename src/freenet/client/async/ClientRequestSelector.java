@@ -22,14 +22,12 @@ import freenet.node.SendableRequest;
 import freenet.node.SendableRequestItem;
 import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
+import freenet.support.Logger.LogLevel;
 import freenet.support.RandomGrabArray;
 import freenet.support.RemoveRandom.RemoveRandomReturn;
 import freenet.support.SectoredRandomGrabArray;
-import freenet.support.SectoredRandomGrabArrayWithInt;
 import freenet.support.SectoredRandomGrabArrayWithObject;
-import freenet.support.SortedVectorByNumber;
 import freenet.support.TimeUtil;
-import freenet.support.Logger.LogLevel;
 
 /** Chooses requests from both CRSCore and CRSNP */
 class ClientRequestSelector implements KeysFetchingLocally {
@@ -189,14 +187,19 @@ class ClientRequestSelector implements KeysFetchingLocally {
 		return null;
 	}
 	
-	private int ctr;
-	
 	public ChosenBlock maybeMakeChosenRequest(SendableRequest req, ObjectContainer container, ClientContext context, long now) {
 		if(req == null) return null;
-		if(req.isCancelled(container)) return null;
-		if(req.getCooldownTime(container, context, now) != 0) return null;
+		if(req.isCancelled(container)) {
+			if(logMINOR) Logger.minor(this, "Request is cancelled: "+req);
+			return null;
+		}
+		if(req.getCooldownTime(container, context, now) != 0) {
+			if(logMINOR) Logger.minor(this, "Request is in cooldown: "+req);
+			return null;
+		}
 		SendableRequestItem token = req.chooseKey(this, req.persistent() ? container : null, context);
 		if(token == null) {
+			if(logMINOR) Logger.minor(this, "Choose key returned null: "+req);
 			return null;
 		} else {
 			Key key;
@@ -240,6 +243,7 @@ class ClientRequestSelector implements KeysFetchingLocally {
 				ignoreStore = false;
 			}
 			ret = new TransientChosenBlock(req, token, key, ckey, localRequestOnly, ignoreStore, canWriteClientCache, forkOnCacheable, sched);
+			if(logMINOR) Logger.minor(this, "Created "+ret+" for "+req);
 			return ret;
 		}
 	}
@@ -267,7 +271,7 @@ class ClientRequestSelector implements KeysFetchingLocally {
 		}
 		boolean tryOfferedKeys = offeredKeys != null && (!notTransient) && random.nextBoolean();
 		if(tryOfferedKeys) {
-			if(offeredKeys.hasValidKeys(this, null, context))
+			if(offeredKeys.getCooldownTime(container, context, now) == 0)
 				return new SelectorReturn(offeredKeys);
 		}
 		long l = removeFirstAccordingToPriorities(fuzz, random, schedCore, schedTransient, transientOnly, maxPrio, container, context, now);
@@ -278,7 +282,7 @@ class ClientRequestSelector implements KeysFetchingLocally {
 		int choosenPriorityClass = (int)l;
 		if(choosenPriorityClass == -1) {
 			if((!notTransient) && !tryOfferedKeys) {
-				if(offeredKeys != null && offeredKeys.hasValidKeys(this, null, context))
+				if(offeredKeys != null && offeredKeys.getCooldownTime(container, context, now) == 0)
 					return new SelectorReturn(offeredKeys);
 			}
 			if(logMINOR)
@@ -591,6 +595,7 @@ outer:	for(;choosenPriorityClass <= maxPrio;choosenPriorityClass++) {
 		synchronized(keysFetching) {
 			boolean ret = keysFetching.contains(key);
 			if(!ret) return ret;
+			// It is being fetched. Add the BaseSendableGet to the wait list so it gets woken up when the request finishes.
 			if(getterWaiting != null) {
 				if(persistent) {
 					Long[] waiting = persistentRequestsWaitingForKeysFetching.get(key);

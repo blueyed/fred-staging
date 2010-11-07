@@ -28,6 +28,7 @@ import freenet.node.NodeStarter;
 import freenet.node.Version;
 import freenet.node.useralerts.UserAlert;
 import freenet.support.HTMLNode;
+import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.MultiValueTable;
 import freenet.support.Logger.LogLevel;
@@ -41,6 +42,17 @@ public class WelcomeToadlet extends Toadlet {
     final NodeClientCore core;
     final Node node;
     final BookmarkManager bookmarkManager;
+
+    private static volatile boolean logMINOR;
+    static {
+        Logger.registerLogThresholdCallback(new LogThresholdCallback() {
+
+            @Override
+            public void shouldUpdate() {
+                logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
+            }
+        });
+    }
 
     WelcomeToadlet(HighLevelSimpleClient client, NodeClientCore core, Node node, BookmarkManager bookmarks) {
         super(client);
@@ -98,7 +110,7 @@ public class WelcomeToadlet extends Toadlet {
         String passwd = request.getPartAsString("formPassword", 32);
         boolean noPassword = (passwd == null) || !passwd.equals(core.formPassword);
         if (noPassword) {
-            if (Logger.shouldLog(LogLevel.MINOR, this)) {
+            if (logMINOR) {
                 Logger.minor(this, "No password (" + passwd + " should be " + core.formPassword + ')');
             }
         }
@@ -214,8 +226,8 @@ public class WelcomeToadlet extends Toadlet {
                 content = ctx.getPageMaker().getInfobox("infobox-success", l10n("insertSucceededTitle"), contentNode, "successful-insert", false);
                 String u = key.toString();
                 NodeL10n.getBase().addL10nSubstitution(content, "WelcomeToadlet.keyInsertedSuccessfullyWithKeyAndName",
-                        new String[]{"link", "/link", "name"},
-                        new String[]{"<a href=\"/" + u + "\">", "</a>", u});
+                        new String[]{"link", "name"},
+                        new HTMLNode[] { HTMLNode.link("/"+u), HTMLNode.text(u) });
             } catch (InsertException e) {
             	content = ctx.getPageMaker().getInfobox("infobox-error", l10n("insertFailedTitle"), contentNode, "failed-insert", false);
                 content.addChild("#", l10n("insertFailedWithMessage", "message", e.getMessage()));
@@ -256,7 +268,7 @@ public class WelcomeToadlet extends Toadlet {
             MultiValueTable<String, String> headers = new MultiValueTable<String, String>();
             headers.put("Location", "/?terminated&formPassword=" + core.formPassword);
             ctx.sendReplyHeaders(302, "Found", headers, null, 0);
-            node.ps.queueTimedJob(new Runnable() {
+            node.ticker.queueTimedJob(new Runnable() {
 
                         public void run() {
                             node.exit("Shutdown from fproxy");
@@ -283,7 +295,7 @@ public class WelcomeToadlet extends Toadlet {
             MultiValueTable<String, String> headers = new MultiValueTable<String, String>();
             headers.put("Location", "/?restarted&formPassword=" + core.formPassword);
             ctx.sendReplyHeaders(302, "Found", headers, null, 0);
-            node.ps.queueTimedJob(new Runnable() {
+            node.ticker.queueTimedJob(new Runnable() {
 
                         public void run() {
                             node.getNodeStarter().restart();
@@ -315,7 +327,7 @@ public class WelcomeToadlet extends Toadlet {
             if (request.isParameterSet("latestlog")) {
                 final File logs = new File(node.config.get("logger").getString("dirname") + File.separator + "freenet-latest.log");
 
-                this.writeHTMLReply(ctx, 200, "OK", FileUtil.readUTF(logs));
+                this.writeTextReply(ctx, 200, "OK", FileUtil.readUTF(logs));
                 return;
             } else if (request.isParameterSet("terminated")) {
                 if ((!request.isParameterSet("formPassword")) || !request.getParam("formPassword").equals(core.formPassword)) {
@@ -447,11 +459,11 @@ public class WelcomeToadlet extends Toadlet {
         		core.node.pluginManager.isPluginLoadedOrLoadingOrWantLoad("Library")) {
 			// Warn that search plugin is not loaded.
 			HTMLNode textSpan = searchBoxContent.addChild("span", "class", "search-not-availible-warning");
-			NodeL10n.getBase().addL10nSubstitution(textSpan, "WelcomeToadlet.searchPluginLoading", new String[] { "link", "/link" }, new String[] { "<a href=\"/plugins/\">", "</a>" });
+			NodeL10n.getBase().addL10nSubstitution(textSpan, "WelcomeToadlet.searchPluginLoading", new String[] { "link" }, new HTMLNode[] { HTMLNode.link("/plugins/") });
         } else {
 			// Warn that search plugin is not loaded.
 			HTMLNode textSpan = searchBoxContent.addChild("span", "class", "search-not-availible-warning");
-			NodeL10n.getBase().addL10nSubstitution(textSpan, "WelcomeToadlet.searchPluginNotLoaded", new String[] { "link", "/link" }, new String[] { "<a href=\"/plugins/\">", "</a>" });
+			NodeL10n.getBase().addL10nSubstitution(textSpan, "WelcomeToadlet.searchPluginNotLoaded", new String[] { "link" }, new HTMLNode[] { HTMLNode.link("/plugins/") });
 		}
 		
 

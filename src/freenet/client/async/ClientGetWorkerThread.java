@@ -65,7 +65,7 @@ public class ClientGetWorkerThread extends Thread {
 	 * @param tagReplacer Used for web-pushing. Only needed if filterData is true.
 	 * @throws URISyntaxException 
 	 */
-	ClientGetWorkerThread(PipedInputStream input, OutputStream output, FreenetURI uri,
+	public ClientGetWorkerThread(PipedInputStream input, OutputStream output, FreenetURI uri,
 			String mimeType, HashResult[] hashes, boolean filterData, String charset,
 			FoundURICallback prefetchHook, TagReplacerCallback tagReplacer) throws URISyntaxException {
 		super("ClientGetWorkerThread");
@@ -136,6 +136,7 @@ public class ClientGetWorkerThread extends Thread {
 
 	/** Stores the exception and awakens blocked threads. */
 	public synchronized void setError(Throwable t) {
+		if(error != null) return;
 		error = t;
 		onFinish();
 	}

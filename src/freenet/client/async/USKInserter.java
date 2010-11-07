@@ -95,11 +95,11 @@ public class USKInserter implements ClientPutState, USKFetcherCallback, PutCompl
 		if(persistent)
 			container.activate(pubUSK, 5);
 		synchronized(this) {
-			if(Logger.shouldLog(LogLevel.MINOR, this))
+			if(logMINOR)
 				Logger.minor(this, "scheduling fetcher for "+pubUSK.getURI());
 			if(finished) return;
 			fetcher = context.uskManager.getFetcherForInsertDontSchedule(persistent ? pubUSK.clone() : pubUSK, parent.priorityClass, this, parent.getClient(), container, context, persistent);
-			if(Logger.shouldLog(LogLevel.MINOR, this))
+			if(logMINOR)
 				Logger.minor(this, "scheduled: "+fetcher);
 		}
 		if(persistent) {
@@ -224,7 +224,7 @@ public class USKInserter implements ClientPutState, USKFetcherCallback, PutCompl
 		synchronized(this) {
 			if(finished) return;
 			edition = edNo;
-			if(Logger.shouldLog(LogLevel.MINOR, this))
+			if(logMINOR)
 				Logger.minor(this, "scheduling insert for "+pubUSK.getURI()+ ' ' +edition);
 			sbi = new SingleBlockInserter(parent, data, compressionCodec, privUSK.getInsertableSSK(edition).getInsertURI(),
 					ctx, this, isMetadata, sourceLength, token, getCHKOnly, false, true /* we don't use it */, tokenObject, container, context, persistent, false, extraInserts, cryptoAlgorithm, forceCryptoKey);
@@ -259,7 +259,7 @@ public class USKInserter implements ClientPutState, USKFetcherCallback, PutCompl
 		if(!targetURI.equals(realURI))
 			Logger.error(this, "URI should be "+targetURI+" actually is "+realURI);
 		else {
-			if(Logger.shouldLog(LogLevel.MINOR, this))
+			if(logMINOR)
 				Logger.minor(this, "URI should be "+targetURI+" actually is "+realURI);
 			context.uskManager.updateKnownGood(pubUSK, edition, context);
 		}
@@ -379,13 +379,23 @@ public class USKInserter implements ClientPutState, USKFetcherCallback, PutCompl
 			if(persist) container.activate(this, 1); // May have been deactivated by callbacks
 		}
 		if(freeData) {
-			if(persistent) container.activate(data, 1);
-			data.free();
-			if(persistent) data.removeFrom(container);
-			synchronized(this) {
-				data = null;
+			if(data == null) {
+				if(persistent) {
+					if(container.ext().isActive(this))
+						Logger.error(this, "data = null in cancel() on "+this+" even though active");
+					else
+						Logger.error(this, "Not active in cancel() on "+this);
+				}
+				Logger.error(this, "data == null in cancel() on "+this, new Exception("error"));
+			} else {
+				if(persistent) container.activate(data, 1);
+				data.free();
+				if(persistent) data.removeFrom(container);
+				synchronized(this) {
+					data = null;
+				}
+				if(persistent) container.store(this);
 			}
-			if(persistent) container.store(this);
 		}
 		if(persistent) container.activate(cb, 1);
 		cb.onFailure(new InsertException(InsertException.CANCELLED), this, container, context);
@@ -448,7 +458,7 @@ public class USKInserter implements ClientPutState, USKFetcherCallback, PutCompl
 	}
 
 	public void removeFrom(ObjectContainer container, ClientContext context) {
-		if(Logger.shouldLog(LogLevel.MINOR, this))
+		if(logMINOR)
 			Logger.minor(this, "Removing from database: "+this, new Exception("debug"));
 		// parent will remove self
 		if(freeData && data != null && container.ext().isStored(data)) {

@@ -9,6 +9,7 @@ import freenet.client.async.ClientRequestScheduler;
 import freenet.client.async.ClientRequester;
 import freenet.client.async.PersistentChosenBlock;
 import freenet.client.async.PersistentChosenRequest;
+import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.RandomGrabArray;
 import freenet.support.RandomGrabArrayItem;
@@ -26,6 +27,16 @@ public abstract class SendableRequest implements RandomGrabArrayItem {
 	
 	// Since we put these into Set's etc, hashCode must be persistent.
 	private final int hashCode;
+
+        private static volatile boolean logMINOR;
+	static {
+		Logger.registerLogThresholdCallback(new LogThresholdCallback(){
+			@Override
+			public void shouldUpdate(){
+				logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
+			}
+		});
+	}
 	
 	SendableRequest(boolean persistent) {
 		this.persistent = persistent;
@@ -107,7 +118,7 @@ public abstract class SendableRequest implements RandomGrabArrayItem {
 			arr.remove(this, container, context);
 		} else {
 			// Should this be a higher priority?
-			if(Logger.shouldLog(LogLevel.MINOR, this))
+			if(logMINOR)
 				Logger.minor(this, "Cannot unregister "+this+" : not registered", new Exception("debug"));
 		}
 		ClientRequester cr = getClientRequest();
@@ -138,7 +149,16 @@ public abstract class SendableRequest implements RandomGrabArrayItem {
 	}
 
 	/** Must be called when we retry a block. */
-	public void clearCooldown(ObjectContainer container, ClientContext context) {
+	public void clearCooldown(ObjectContainer container, ClientContext context, boolean definitelyExists) {
+		if(persistent && !container.ext().isStored(this)) {
+			if(definitelyExists)
+				Logger.error(this, "Clear cooldown on persistent request "+this+" but already removed");
+			else if(hashCode != 0) // conceivably there might be a problem, but unlikely 
+				Logger.normal(this, "Clear cooldown on persistent request "+this+" but already removed");
+			else // removed, not likely to be an issue.
+				Logger.minor(this, "Clear cooldown on persistent request "+this+" but already removed");
+			return;
+		}
 		// The request is no longer running, therefore presumably it can be selected, or it's been removed.
 		// Stuff that uses the cooldown queue will set or clear depending on whether we retry, but
 		// we clear here for stuff that doesn't use it.
@@ -150,7 +170,7 @@ public abstract class SendableRequest implements RandomGrabArrayItem {
 		if(rga != null)
 			context.cooldownTracker.clearCachedWakeup(rga, persistent, container);
 		// If we didn't actually get queued, we should wake up the starter, for the same reason we clearCachedWakeup().
-		context.getChkFetchScheduler().wakeStarter();
+		getScheduler(context).wakeStarter();
 	}
 
 }

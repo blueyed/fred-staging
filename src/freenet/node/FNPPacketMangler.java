@@ -10,6 +10,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
+import java.util.concurrent.atomic.AtomicLong;
 
 import net.i2p.util.NativeBigInteger;
 import freenet.crypt.BlockCipher;
@@ -26,6 +27,7 @@ import freenet.crypt.SHA256;
 import freenet.crypt.UnsupportedCipherException;
 import freenet.crypt.ciphers.Rijndael;
 import freenet.io.AddressTracker;
+import freenet.io.AddressTracker.Status;
 import freenet.io.comm.AsyncMessageCallback;
 import freenet.io.comm.DMT;
 import freenet.io.comm.FreenetInetAddress;
@@ -120,13 +122,6 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 	private long jfkDHLastGenerationTimestamp = 0;
 
 	protected static final int NONCE_SIZE = 8;
-	/**
-	 * How big can the authenticator get before we flush it ?
-	 * roughly n*(sizeof(message3|message4) + H(authenticator))
-	 *
-	 * We push to it until we reach the cap where we rekey
-	 */
-	private static final int AUTHENTICATOR_CACHE_SIZE = 30;
 	private static final int MAX_PACKETS_IN_FLIGHT = 256;
 	private static final int RANDOM_BYTES_LENGTH = 12;
 	private static final int HASH_LENGTH = SHA256.getDigestLength();
@@ -166,10 +161,12 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 	/** Headers overhead if there is one message and no acks. */
 	static public final int HEADERS_LENGTH_ONE_MESSAGE =
 		HEADERS_LENGTH_MINIMUM + 2; // 2 bytes = length of message. rest is the same.
-	static boolean LOG_UNMATCHABLE_ERROR = false;
 
 	final int fullHeadersLengthMinimum;
 	final int fullHeadersLengthOneMessage;
+        
+        private long lastConnectivityStatusUpdate;
+        private Status lastConnectivityStatus;
 
 
 	public FNPPacketMangler(Node node, NodeCrypto crypt, PacketSocketHandler sock) {
@@ -180,7 +177,6 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 		fnpTimingSource = new EntropySource();
 		myPacketDataSource = new EntropySource();
 		authenticatorCache = new HashMap<ByteArrayWrapper, byte[]>();
-
 		fullHeadersLengthMinimum = HEADERS_LENGTH_MINIMUM + sock.getHeadersLength();
 		fullHeadersLengthOneMessage = HEADERS_LENGTH_ONE_MESSAGE + sock.getHeadersLength();
 	}
@@ -198,6 +194,8 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 		}
 	}
 
+	private static final AtomicLong successfullyDecodedPackets = new AtomicLong();
+	private static final AtomicLong failedDecodePackets = new AtomicLong();
 
 	/**
 	 * Packet format:
@@ -213,7 +211,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 	 * E_session_pcfb(data) // IV = first 32 bytes of packet
 	 *
 	 */
-
+	
 	/**
 	 * Decrypt and authenticate packet.
 	 * Then feed it to USM.checkFilters.
@@ -241,19 +239,34 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 			if(logMINOR) Logger.minor(this, "Trying exact match");
 			if(length > HEADERS_LENGTH_MINIMUM) {
 				if(logMINOR) Logger.minor(this, "Trying current key tracker for exact match");
-				if(tryProcess(buf, offset, length, opn.getCurrentKeyTracker(), now)) return;
+				if(tryProcess(buf, offset, length, opn.getCurrentKeyTracker(), now)) {
+					if(logMINOR) successfullyDecodedPackets.incrementAndGet();
+					return;
+				}
 				// Try with old key
 				if(logMINOR) Logger.minor(this, "Trying previous key tracker for exact match");
-				if(tryProcess(buf, offset, length, opn.getPreviousKeyTracker(), now)) return;
+				if(tryProcess(buf, offset, length, opn.getPreviousKeyTracker(), now)) {
+					if(logMINOR) successfullyDecodedPackets.incrementAndGet();
+					return;
+				}
 				// Try with unverified key
 				if(logMINOR) Logger.minor(this, "Trying unverified key tracker for exact match");
-				if(tryProcess(buf, offset, length, opn.getUnverifiedKeyTracker(), now)) return;
+				if(tryProcess(buf, offset, length, opn.getUnverifiedKeyTracker(), now)) {
+					if(logMINOR) successfullyDecodedPackets.incrementAndGet();
+					return;
+				}
 			}
 			if(length > Node.SYMMETRIC_KEY_LENGTH /* iv */ + HASH_LENGTH + 2 && !node.isStopping()) {
 				// Might be an auth packet
-				if(tryProcessAuth(buf, offset, length, opn, peer, false, now)) return;
+				if(tryProcessAuth(buf, offset, length, opn, peer, false, now)) {
+					if(logMINOR) successfullyDecodedPackets.incrementAndGet();
+					return;
+				}
 				// Might be a reply to an anon auth packet
-				if(tryProcessAuthAnonReply(buf, offset, length, opn, peer, now)) return;
+				if(tryProcessAuthAnonReply(buf, offset, length, opn, peer, now)) {
+					if(logMINOR) successfullyDecodedPackets.incrementAndGet();
+					return;
+				}
 			}
 		}
 		PeerNode[] peers = crypto.getPeerNodes();
@@ -262,22 +275,25 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 			for(int i=0;i<peers.length;i++) {
 				pn = peers[i];
 				if(pn == opn) continue;
-				if(logMINOR) Logger.minor(this, "Trying current key tracker for loop");
+				if(logDEBUG) Logger.debug(this, "Trying current key tracker for loop");
 				if(tryProcess(buf, offset, length, pn.getCurrentKeyTracker(), now)) {
 					// IP address change
 					pn.changedIP(peer);
+					if(logMINOR) successfullyDecodedPackets.incrementAndGet();
 					return;
 				}
-				if(logMINOR) Logger.minor(this, "Trying previous key tracker for loop");
+				if(logDEBUG) Logger.debug(this, "Trying previous key tracker for loop");
 				if(tryProcess(buf, offset, length, pn.getPreviousKeyTracker(), now)) {
 					// IP address change
 					pn.changedIP(peer);
+					if(logMINOR) successfullyDecodedPackets.incrementAndGet();
 					return;
 				}
-				if(logMINOR) Logger.minor(this, "Trying unverified key tracker for loop");
+				if(logDEBUG) Logger.debug(this, "Trying unverified key tracker for loop");
 				if(tryProcess(buf, offset, length, pn.getUnverifiedKeyTracker(), now)) {
 					// IP address change
 					pn.changedIP(peer);
+					if(logMINOR) successfullyDecodedPackets.incrementAndGet();
 					return;
 				}
 			}
@@ -288,7 +304,10 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 			for(int i=0;i<peers.length;i++) {
 				pn = peers[i];
 				if(pn == opn) continue;
-				if(tryProcessAuth(buf, offset, length, pn, peer,false, now)) return;
+				if(tryProcessAuth(buf, offset, length, pn, peer,false, now)) {
+					if(logMINOR) successfullyDecodedPackets.incrementAndGet();
+					return;
+				}
 			}
 		}
 		PeerNode[] anonPeers = crypto.getAnonSetupPeerNodes();
@@ -296,22 +315,35 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 			for(int i=0;i<anonPeers.length;i++) {
 				pn = anonPeers[i];
 				if(pn == opn) continue;
-				if(tryProcessAuthAnonReply(buf, offset, length, pn, peer, now)) return;
+				if(tryProcessAuthAnonReply(buf, offset, length, pn, peer, now)) {
+					if(logMINOR) successfullyDecodedPackets.incrementAndGet();
+					return;
+				}
+			}
+		}
+		if(length > HEADERS_LENGTH_MINIMUM) {
+			for(int i=0;i<anonPeers.length;i++) {
+				pn = anonPeers[i];
+				if(pn == opn) continue;
 				if(tryProcess(buf, offset, length, pn.getCurrentKeyTracker(), now)) {
 					pn.changedIP(peer);
+					if(logMINOR) successfullyDecodedPackets.incrementAndGet();
 					return;
 				}
 				if(tryProcess(buf, offset, length, pn.getPreviousKeyTracker(), now)) {
 					pn.changedIP(peer);
+					if(logMINOR) successfullyDecodedPackets.incrementAndGet();
 					return;
 				}
 				if(tryProcess(buf, offset, length, pn.getUnverifiedKeyTracker(), now)) {
 					pn.changedIP(peer);
+					if(logMINOR) successfullyDecodedPackets.incrementAndGet();
 					return;
 				}
 			}
 		}
 
+		boolean didntTryOldOpennetPeers;
 		OpennetManager opennet = node.getOpennet();
 		if(opennet != null) {
 			// Try old opennet connections.
@@ -322,14 +354,31 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 				for(int i=0;i<oldPeers.length;i++) {
 					if(tryProcessAuth(buf, offset, length, oldPeers[i], peer, true, now)) return;
 				}
-			}
-		}
+				didntTryOldOpennetPeers = false;
+			} else
+				didntTryOldOpennetPeers = true;
+		} else
+			didntTryOldOpennetPeers = false;
 		if(node.wantAnonAuth()) {
 			if(tryProcessAuthAnon(buf, offset, length, peer)) return;
 		}
-		if(LOG_UNMATCHABLE_ERROR)
-			System.err.println("Unmatchable packet from "+peer+" on "+node.getDarknetPortNumber());
-		Logger.normal(this,"Unmatchable packet from "+peer);
+
+                // Don't log too much if we are a seednode
+                if(logMINOR && crypto.isOpennet && node.wantAnonAuth()) {
+                	if(!didntTryOldOpennetPeers)
+                		Logger.minor(this,"Unmatchable packet from "+peer);
+                } else
+                    Logger.normal(this,"Unmatchable packet from "+peer);
+                
+                if(logMINOR && !didntTryOldOpennetPeers)
+                	failedDecodePackets.incrementAndGet();
+	}
+	
+	public static long[] getDecodedPackets() {
+		if(!logMINOR) return null;
+		long decoded = successfullyDecodedPackets.get();
+		long failed = failedDecodePackets.get();
+		return new long[] { decoded, decoded+failed };
 	}
 
 	/**
@@ -344,7 +393,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 	 */
 	private boolean tryProcessAuth(byte[] buf, int offset, int length, PeerNode pn, Peer peer, boolean oldOpennetPeer, long now) {
 		BlockCipher authKey = pn.incomingSetupCipher;
-		if(logMINOR) Logger.minor(this, "Decrypt key: "+HexUtil.bytesToHex(pn.incomingSetupKey)+" for "+peer+" : "+pn+" in tryProcessAuth");
+		if(logDEBUG) Logger.debug(this, "Decrypt key: "+HexUtil.bytesToHex(pn.incomingSetupKey)+" for "+peer+" : "+pn+" in tryProcessAuth");
 		// Does the packet match IV E( H(data) data ) ?
 		PCFBMode pcfb = PCFBMode.create(authKey);
 		int ivLength = pcfb.lengthIV();
@@ -373,9 +422,9 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 		int byte1 = ((pcfb.decipher(buf[dataStart-2])) & 0xff);
 		int byte2 = ((pcfb.decipher(buf[dataStart-1])) & 0xff);
 		int dataLength = (byte1 << 8) + byte2;
-		if(logMINOR) Logger.minor(this, "Data length: "+dataLength+" (1 = "+byte1+" 2 = "+byte2+ ')');
+		if(logDEBUG) Logger.debug(this, "Data length: "+dataLength+" (1 = "+byte1+" 2 = "+byte2+ ')');
 		if(dataLength > length - (ivLength+hash.length+2)) {
-			if(logMINOR) Logger.minor(this, "Invalid data length "+dataLength+" ("+(length - (ivLength+hash.length+2))+") in tryProcessAuth");
+			if(logDEBUG) Logger.debug(this, "Invalid data length "+dataLength+" ("+(length - (ivLength+hash.length+2))+") in tryProcessAuth");
 			return false;
 		}
 		// Decrypt the data
@@ -394,7 +443,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 			pn.reportIncomingPacket(buf, offset, length, now);
 			return true;
 		} else {
-			if(logMINOR) Logger.minor(this, "Incorrect hash in tryProcessAuth for "+peer+" (length="+dataLength+"): \nreal hash="+HexUtil.bytesToHex(realHash)+"\n bad hash="+HexUtil.bytesToHex(hash));
+			if(logDEBUG) Logger.debug(this, "Incorrect hash in tryProcessAuth for "+peer+" (length="+dataLength+"): \nreal hash="+HexUtil.bytesToHex(realHash)+"\n bad hash="+HexUtil.bytesToHex(hash));
 			return false;
 		}
 	}
@@ -484,7 +533,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 		int ivLength = pcfb.lengthIV();
 		int digestLength = HASH_LENGTH;
 		if(length < digestLength + ivLength + 5) {
-			if(logMINOR) Logger.minor(this, "Too short: "+length+" should be at least "+(digestLength + ivLength + 5));
+			if(logDEBUG) Logger.debug(this, "Too short: "+length+" should be at least "+(digestLength + ivLength + 5));
 			return false;
 		}
 		// IV at the beginning
@@ -501,9 +550,9 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 		int byte1 = ((pcfb.decipher(buf[dataStart-2])) & 0xff);
 		int byte2 = ((pcfb.decipher(buf[dataStart-1])) & 0xff);
 		int dataLength = (byte1 << 8) + byte2;
-		if(logMINOR) Logger.minor(this, "Data length: "+dataLength+" (1 = "+byte1+" 2 = "+byte2+ ')');
+		if(logDEBUG) Logger.minor(this, "Data length: "+dataLength+" (1 = "+byte1+" 2 = "+byte2+ ')');
 		if(dataLength > length - (ivLength+hash.length+2)) {
-			if(logMINOR) Logger.minor(this, "Invalid data length "+dataLength+" ("+(length - (ivLength+hash.length+2))+") in tryProcessAuth");
+			if(logDEBUG) Logger.debug(this, "Invalid data length "+dataLength+" ("+(length - (ivLength+hash.length+2))+") in tryProcessAuth");
 			return false;
 		}
 		// Decrypt the data
@@ -518,7 +567,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 			processDecryptedAuthAnonReply(payload, peer, pn);
 			return true;
 		} else {
-			if(logMINOR) Logger.minor(this, "Incorrect hash in tryProcessAuth for "+peer+" (length="+dataLength+"): \nreal hash="+HexUtil.bytesToHex(realHash)+"\n bad hash="+HexUtil.bytesToHex(hash));
+			if(logDEBUG) Logger.debug(this, "Incorrect hash in tryProcessAuth for "+peer+" (length="+dataLength+"): \nreal hash="+HexUtil.bytesToHex(realHash)+"\n bad hash="+HexUtil.bytesToHex(hash));
 			return false;
 		}
 	}
@@ -1836,7 +1885,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 			if(logDEBUG) Logger.debug(this, "Tracker == null");
 			return false;
 		}
-		if(logMINOR) Logger.minor(this,"Entering tryProcess: "+Fields.hashCode(buf)+ ',' +offset+ ',' +length+ ',' +tracker);
+		if(logDEBUG) Logger.debug(this,"Entering tryProcess: "+Fields.hashCode(buf)+ ',' +offset+ ',' +length+ ',' +tracker);
 		/**
 		 * E_pcbc_session(H(seq+random+data)) E_pcfb_session(seq+random+data)
 		 *
@@ -1849,7 +1898,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 			if(logMINOR) Logger.minor(this, "No cipher");
 			return false;
 		}
-		if(logMINOR) Logger.minor(this, "Decrypting with "+HexUtil.bytesToHex(tracker.sessionKey));
+		if(logDEBUG) Logger.debug(this, "Decrypting with "+HexUtil.bytesToHex(tracker.sessionKey));
 		int blockSize = sessionCipher.getBlockSize() >> 3;
 		if(sessionCipher.getKeySize() != sessionCipher.getBlockSize())
 			throw new IllegalStateException("Block size must be equal to key size");
@@ -1883,7 +1932,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 		PacketTracker packets = tracker.packets;
 
 		int targetSeqNumber = packets.highestReceivedIncomingSeqNumber();
-		if(logMINOR) Logger.minor(this, "Seqno: "+seqNumber+" (highest seen "+targetSeqNumber+") receiving packet from "+tracker.pn.getPeer());
+		if(logDEBUG) Logger.debug(this, "Seqno: "+seqNumber+" (highest seen "+targetSeqNumber+") receiving packet from "+tracker.pn.getPeer());
 
 		if(seqNumber == -1) {
 			// Ack/resendreq-only packet
@@ -1894,7 +1943,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 				return false;
 			}
 		}
-		if(logMINOR) Logger.minor(this, "Sequence number received: "+seqNumber);
+		if(logDEBUG) Logger.debug(this, "Sequence number received: "+seqNumber);
 
 		// Plausible, so lets decrypt the rest of the data
 
@@ -1920,7 +1969,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 
 		// Check the hash
 		if(!Arrays.equals(packetHash, realHash)) {
-			if(logMINOR) Logger.minor(this, "Packet possibly from "+tracker+" hash does not match:\npacketHash="+
+			if(logDEBUG) Logger.debug(this, "Packet possibly from "+tracker+" hash does not match:\npacketHash="+
 					HexUtil.bytesToHex(packetHash)+"\n  realHash="+HexUtil.bytesToHex(realHash)+" ("+(length-HASH_LENGTH)+" bytes payload)");
 			return false;
 		}
@@ -1931,9 +1980,9 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 		for(int i=0;i<HASH_LENGTH;i++) {
 			packetHash[i] ^= buf[offset+i];
 		}
-		if(logMINOR) Logger.minor(this, "Contributing entropy");
+		if(logDEBUG) Logger.minor(this, "Contributing entropy");
 		node.random.acceptEntropyBytes(myPacketDataSource, packetHash, 0, HASH_LENGTH, 0.5);
-		if(logMINOR) Logger.minor(this, "Contributed entropy");
+		if(logDEBUG) Logger.minor(this, "Contributed entropy");
 
 		// Lots more to do yet!
 		processDecryptedData(plaintext, seqNumber, tracker, length - plaintext.length);
@@ -2733,8 +2782,8 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 				peers = peersWithProblems.toArray(new Peer[peersWithProblems.size()]);
 			}
 			NodeL10n.getBase().addL10nSubstitution(div, "FNPPacketMangler.somePeersDisconnectedStillNotAckedDetail",
-					new String[] { "count", "link", "/link" }
-					, new String[] { Integer.toString(peers.length), "<a href=\"/?_CHECKED_HTTP_=https://bugs.freenetproject.org/view.php?id=2692\">", "</a>" });
+					new String[] { "count", "link" },
+					new HTMLNode[] { HTMLNode.text(peers.length), HTMLNode.link("/?_CHECKED_HTTP_=https://bugs.freenetproject.org/view.php?id=2692") });
 			HTMLNode list = div.addChild("ul");
 			for(Peer peer : peers) {
 				list.addChild("li", peer.toString());
@@ -3090,6 +3139,19 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 	private long timeLastReset = -1;
 
 	/**
+	 * How big can the authenticator cache get before we flush it ?
+	 * n * 40 bytes (32 for the authenticator and 8 for the timestamp)
+	 *
+	 * We push to it until we reach the cap where we rekey or we reach the PFS interval
+	 */
+	private int getAuthenticatorCacheSize() {
+		if(crypto.isOpennet && node.wantAnonAuth()) // seednodes
+			return 5000; // 200kB
+		else
+			return 250; // 10kB
+	}
+	
+	/**
 	 * Change the transient key used by JFK.
 	 *
 	 * It will determine the PFS interval, hence we call it at least once every 30mins.
@@ -3100,6 +3162,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 		long now = System.currentTimeMillis();
 		boolean isCacheTooBig = true;
 		int authenticatorCacheSize = 0;
+		int AUTHENTICATOR_CACHE_SIZE = getAuthenticatorCacheSize();
 		synchronized (authenticatorCache) {
 			authenticatorCacheSize = authenticatorCache.size();
 			if(authenticatorCacheSize < AUTHENTICATOR_CACHE_SIZE) {
@@ -3138,10 +3201,20 @@ public class FNPPacketMangler implements OutgoingPacketMangler, IncomingPacketFi
 		return data;
 	}
 
-	public int getConnectivityStatus() {
-		if(crypto.config.alwaysHandshakeAggressively())
-			return AddressTracker.DEFINITELY_NATED;
-		return sock.getDetectedConnectivityStatus();
+	public Status getConnectivityStatus() {
+		long now = System.currentTimeMillis();
+		if (now - lastConnectivityStatusUpdate < 3 * 60 * 1000)
+			return lastConnectivityStatus;
+
+		Status value;
+		if (crypto.config.alwaysHandshakeAggressively())
+			value = AddressTracker.Status.DEFINITELY_NATED;
+		else
+			value = sock.getDetectedConnectivityStatus();
+
+		lastConnectivityStatusUpdate = now;
+
+		return lastConnectivityStatus = value;
 	}
 
 	public boolean allowConnection(PeerNode pn, FreenetInetAddress addr) {

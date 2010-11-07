@@ -17,6 +17,7 @@ import com.db4o.ObjectContainer;
 import freenet.client.async.ClientContext;
 import freenet.client.async.DBJob;
 import freenet.client.async.DatabaseDisabledException;
+import freenet.node.RequestClient;
 import freenet.support.HexUtil;
 import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
@@ -89,6 +90,17 @@ public class FCPConnectionHandler implements Closeable {
 	private final HashMap<String, DirectoryAccess> checkedDirectories = new HashMap<String, DirectoryAccess>();
 	// DDACheckJobs in flight
 	private final HashMap<File, DDACheckJob> inTestDirectories = new HashMap<File, DDACheckJob>();
+	public final RequestClient connectionRequestClient = new RequestClient() {
+		
+		public boolean persistent() {
+			return false;
+		}
+		
+		public void removeFrom(ObjectContainer container) {
+			throw new UnsupportedOperationException();
+		}
+		
+	};
 	
 	public FCPConnectionHandler(Socket s, FCPServer server) {
 		this.sock = s;
@@ -119,14 +131,19 @@ public class FCPConnectionHandler implements Closeable {
 		boolean dupe;
 		SubscribeUSK[] uskSubscriptions2;
 		synchronized(this) {
+			if(isClosed) {
+				Logger.error(this, "Already closed: "+this, new Exception("debug"));
+				return;
+			}
 			isClosed = true;
 			requests = new ClientRequest[requestsByIdentifier.size()];
 			requests = requestsByIdentifier.values().toArray(requests);
+			requestsByIdentifier.clear();
 			uskSubscriptions2 = uskSubscriptions.values().toArray(new SubscribeUSK[uskSubscriptions.size()]);
 			dupe = killedDupe;
 		}
-		for(int i=0;i<requests.length;i++)
-			requests[i].onLostConnection(null, server.core.clientContext);
+		for(ClientRequest req : requests)
+			req.onLostConnection(null, server.core.clientContext);
 		for(SubscribeUSK sub : uskSubscriptions2)
 			sub.unsubscribe();
 		if(!dupe) {
@@ -203,29 +220,8 @@ public class FCPConnectionHandler implements Closeable {
 	public void setClientName(final String name) {
 		this.clientName = name;
 		rebootClient = server.registerRebootClient(name, server.core, this);
-		rebootClient.queuePendingMessagesOnConnectionRestart(outputHandler, null);
-		if(!server.core.killedDatabase())
-			try {
-				server.core.clientContext.jobRunner.queue(new DBJob() {
-
-					public boolean run(ObjectContainer container, ClientContext context) {
-						try {
-							createForeverClient(name, container);
-						} catch (Throwable t) {
-							Logger.error(this, "Caught "+t+" creating persistent client for "+name, t);
-							failedGetForever = true;
-							synchronized(FCPConnectionHandler.this) {
-								failedGetForever = true;
-								FCPConnectionHandler.this.notifyAll();
-							}
-						}
-						return false;
-					}
-					
-				}, NativeThread.NORM_PRIORITY, false);
-			} catch (DatabaseDisabledException e) {
-				// Impossible??
-			}
+		rebootClient.queuePendingMessagesOnConnectionRestartAsync(outputHandler, null, server.core.clientContext);
+		// Create foreverClient lazily. Everything that needs it (especially creating ClientGet's etc) runs on a database job.
 		if(logMINOR)
 			Logger.minor(this, "Set client name: "+name);
 	}
@@ -239,7 +235,7 @@ public class FCPConnectionHandler implements Closeable {
 			foreverClient = client;
 			FCPConnectionHandler.this.notifyAll();
 		}
-		client.queuePendingMessagesOnConnectionRestart(outputHandler, container);
+		client.queuePendingMessagesOnConnectionRestartAsync(outputHandler, container, server.core.clientContext);
 		return foreverClient;
 	}
 

@@ -1012,12 +1012,12 @@ public class SplitFileFetcherSegment implements FECCallback, HasCooldownTrackerI
 					return; // Calling addToQueue now will NPE.
 				}
 			}
-		codec.addToQueue(new FECJob(codec, context.fecQueue, dataBuckets, checkBuckets, 32768, context.getBucketFactory(persistent), this, false, parent.getPriorityClass(), persistent),
-				context.fecQueue, container);
-		if(persistent) {
-			container.deactivate(parent, 1);
-			container.deactivate(context, 1);
-		}
+			codec.addToQueue(new FECJob(codec, context.fecQueue, dataBuckets, checkBuckets, 32768, context.getBucketFactory(persistent), this, false, parent.getPriorityClass(), persistent),
+					context.fecQueue, container);
+			if(persistent) {
+				container.deactivate(parent, 1);
+				container.deactivate(context, 1);
+			}
 		} catch (Throwable t) {
 			Logger.error(this, "Caught "+t, t);
 			onFailed(t, container, context);
@@ -1229,8 +1229,8 @@ public class SplitFileFetcherSegment implements FECCallback, HasCooldownTrackerI
 							if(logMINOR) Logger.minor(this, "Verified key for block "+blockNo+" from "+dataSource);
 						}
 					} else {
-						if(dataSource.equals("FEC ENCODE") || dataSource.equals("FEC DECODE")
-								|| dataSource.equals("CROSS-SEGMENT FEC") && haveBlock(blockNo, container)) {
+						if((dataSource.equals("FEC ENCODE") || dataSource.equals("FEC DECODE")
+								|| dataSource.equals("CROSS-SEGMENT FEC")) && haveBlock(blockNo, container)) {
 							// Ignore. FIXME Probably we should not delete the keys until after the encode??? Back compatibility issues maybe though...
 							if(logMINOR) Logger.minor(this, "Key is null for block "+blockNo+" when checking key / adding to binary blob, key source is "+dataSource, new Exception("error"));
 						} else {
@@ -1350,7 +1350,7 @@ public class SplitFileFetcherSegment implements FECCallback, HasCooldownTrackerI
 			if(!getterActive) container.activate(getter, 1);
 		}
 		getter.reschedule(container, context);
-		getter.clearCooldown(container, context);
+		getter.clearCooldown(container, context, true);
 		if(!getterActive) container.deactivate(getter, 1);
 		return getter;
 	}
@@ -1721,28 +1721,6 @@ public class SplitFileFetcherSegment implements FECCallback, HasCooldownTrackerI
 		return v.toArray(new Integer[v.size()]);
 	}
 
-	public void resetCooldownTimes(ObjectContainer container, ClientContext context) {
-		if(logMINOR) Logger.minor(this, "Resetting cooldown times on "+this);
-		if(getter != null) {
-			context.cooldownTracker.clearCachedWakeup(getter, persistent, container);
-			context.cooldownTracker.clearCachedWakeup(getter.getParentGrabArray(), persistent, container);
-		}
-		context.getChkFetchScheduler().wakeStarter();
-		// FIXME need a more efficient way to get maxTries!
-		if(persistent) {
-			container.activate(blockFetchContext, 1);
-		}
-		synchronized(this) {
-			MyCooldownTrackerItem tracker = makeCooldownTrackerItem(container, context);
-			long[] dataCooldownTimes = tracker.dataCooldownTimes;
-			long[] checkCooldownTimes = tracker.checkCooldownTimes;
-			for(int i=0;i<dataCooldownTimes.length;i++)
-				dataCooldownTimes[i] = -1;
-			for(int i=0;i<checkCooldownTimes.length;i++)
-				checkCooldownTimes[i] = -1;
-		}
-	}
-
 	public void onFailed(Throwable t, ObjectContainer container, ClientContext context) {
 		synchronized(this) {
 			if(finished) {
@@ -1991,7 +1969,6 @@ public class SplitFileFetcherSegment implements FECCallback, HasCooldownTrackerI
 			if(persistent) container.activate(block, 1);
 			Bucket data = block.getData();
 			if(data != null) {
-				Logger.error(this, "Check block "+i+" still present in removeFrom()! on "+this);
 				if(persistent) container.activate(data, 1);
 				data.free();
 			}
@@ -2003,6 +1980,9 @@ public class SplitFileFetcherSegment implements FECCallback, HasCooldownTrackerI
 	}
 
 	public void removeFrom(ObjectContainer container, ClientContext context) {
+		if(!finished) {
+			Logger.error(this, "Removing "+this+" but not finished, fetcher finished "+fetcherFinished+" fetcher half finished "+fetcherHalfFinished+" encoder finished "+encoderFinished);
+		}
 		if(logMINOR) Logger.minor(this, "removing "+this);
 		context.cooldownTracker.remove(this, true, container);
 		freeDecodedData(container, true);
@@ -2047,9 +2027,12 @@ public class SplitFileFetcherSegment implements FECCallback, HasCooldownTrackerI
 			fetcherHalfFinished = true;
 			finish = encoderFinished;
 		}
-		if(finish) freeDecodedData(container, false);
-		else {
-			if(logMINOR) Logger.minor(this, "Fetcher half finished on "+this);
+		if(finish) {
+			if(crossCheckBlocks == 0) 
+				freeDecodedData(container, false);
+			// Else wait for the whole splitfile to complete in fetcherFinished(), and then free decoded data in removeFrom().
+		} else {
+			if(logMINOR) Logger.minor(this, "Fetcher half-finished but fetcher not finished on "+this);
 		}
 		if(persistent) container.store(this);
 		
@@ -2074,6 +2057,7 @@ public class SplitFileFetcherSegment implements FECCallback, HasCooldownTrackerI
 			}
 		}
 		if(persistent) removeFrom(container, context);
+		else freeDecodedData(container, true);
 	}
 	
 	private void encoderFinished(ObjectContainer container, ClientContext context) {
@@ -2088,7 +2072,9 @@ public class SplitFileFetcherSegment implements FECCallback, HasCooldownTrackerI
 		if(finish) {
 			if(persistent) removeFrom(container, context);
 		} else if(half) {
-			freeDecodedData(container, false);
+			if(crossCheckBlocks == 0)
+				freeDecodedData(container, false);
+			// Else wait for the whole splitfile to complete in fetcherFinished(), and then free decoded data in removeFrom().
 			if(persistent) container.store(this);
 			if(logMINOR) Logger.minor(this, "Encoder finished but fetcher not finished on "+this);
 		} else {
@@ -2137,29 +2123,6 @@ public class SplitFileFetcherSegment implements FECCallback, HasCooldownTrackerI
 	
 	public final int realDataBlocks() {
 		return dataBuckets.length - crossCheckBlocks;
-	}
-
-	public boolean hasValidKeys(SplitFileFetcherSegmentGet getter, 
-			KeysFetchingLocally fetching, ObjectContainer container, ClientContext context) {
-		if(keys == null) migrateToKeys(container);
-		else {
-			if(persistent) container.activate(keys, 1);
-		}
-		long now = System.currentTimeMillis();
-		int maxTries = getMaxRetries(container);
-		synchronized(this) {
-			if(startedDecode || isFinishing(container)) return false;
-			for(int i=0;i<dataBuckets.length+checkBuckets.length;i++) {
-				if(foundKeys[i]) continue;
-				if(getCooldownWakeup(i, maxTries, container, context) > now) continue;
-				// Double check
-				if(getBlockBucket(i, container) != null) continue;
-				Key key = keys.getNodeKey(i, null, true);
-				if(fetching.hasKey(key, getter, persistent, container)) continue;
-				return true;
-			}
-		}
-		return false;
 	}
 
 	/**

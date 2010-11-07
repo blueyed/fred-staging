@@ -14,6 +14,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URLDecoder;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -24,6 +25,7 @@ import java.util.StringTokenizer;
 import javax.naming.SizeLimitExceededException;
 
 import freenet.support.Fields;
+import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.MultiValueTable;
 import freenet.support.SimpleReadOnlyArrayBucket;
@@ -79,6 +81,16 @@ public class HTTPRequestImpl implements HTTPRequest {
 	private final BucketFactory bucketfactory;
 	
 	private final String method;
+
+        private static volatile boolean logMINOR;
+	static {
+		Logger.registerLogThresholdCallback(new LogThresholdCallback(){
+			@Override
+			public void shouldUpdate(){
+				logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
+			}
+		});
+	}
 
 	/**
 	 * Create a new HTTPRequest for the given URI and parse its request
@@ -159,6 +171,15 @@ public class HTTPRequestImpl implements HTTPRequest {
 	}
 
 	/**
+	 * Returns the names of all parameters.
+	 *
+	 * @return The names of all parameters
+	 */
+	public Collection<String> getParameterNames() {
+		return parameterNameValuesMap.keySet();
+	}
+
+	/**
 	 * Parse the query string and populate {@link #parameterNameValuesMap} with
 	 * the lists of values for each parameter. If this method is not called at
 	 * all, all other methods would be useless. Because they rely on the
@@ -170,7 +191,6 @@ public class HTTPRequestImpl implements HTTPRequest {
 	 */
 	private void parseRequestParameters(String queryString, boolean doUrlDecoding, boolean asParts) {
 
-		boolean logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
 		if(logMINOR) Logger.minor(this, "queryString is "+queryString+", doUrlDecoding="+doUrlDecoding);
 		
 		// nothing to do if there was no query string in the URI
@@ -393,7 +413,6 @@ public class HTTPRequestImpl implements HTTPRequest {
 		OutputStream bbos = null;
 
 		try {
-			boolean logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
 			if(data == null)
 				return;
 			String ctype = this.headers.get("content-type");
@@ -484,7 +503,7 @@ public class HTTPRequestImpl implements HTTPRequest {
 					}
 					else if(hdrname.equalsIgnoreCase("Content-Type")) {
 						contentType = lineparts[1].trim();
-						if(Logger.shouldLog(LogLevel.MINOR, this))
+						if(logMINOR)
 							Logger.minor(this, "Parsed type: " + contentType);
 					}
 					else {
@@ -769,6 +788,10 @@ public class HTTPRequestImpl implements HTTPRequest {
 			return -1;
 		// it is already parsed, so NumberFormatException can not happens here
 		return Integer.parseInt(slen);
+	}
+
+	public String[] getParts() {
+		return parts.keySet().toArray(new String[parts.size()]);
 	}
 
 }

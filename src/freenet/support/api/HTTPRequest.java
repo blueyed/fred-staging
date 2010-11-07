@@ -3,6 +3,7 @@
  * http://www.gnu.org/ for further details of the GPL. */
 package freenet.support.api;
 
+import java.util.Collection;
 import java.util.NoSuchElementException;
 
 import javax.naming.SizeLimitExceededException;
@@ -180,5 +181,14 @@ public interface HTTPRequest {
 
 	/** Get the length of the original uploaded raw data for a POST. */
 	public int getContentLength();
+
+	public String[] getParts();
+
+	/**
+	 * Returns the names of all parameters.
+	 *
+	 * @return The names of all parameters
+	 */
+	public Collection<String> getParameterNames();
 
 }

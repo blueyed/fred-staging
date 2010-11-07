@@ -61,6 +61,9 @@ import freenet.keys.ClientSSK;
 import freenet.keys.FreenetURI;
 import freenet.keys.Key;
 import freenet.keys.USK;
+import freenet.node.NodeStats.ByteCountersSnapshot;
+import freenet.node.NodeStats.PeerLoadStats;
+import freenet.node.NodeStats.RunningRequestsSnapshot;
 import freenet.node.OpennetManager.ConnectionType;
 import freenet.node.PeerManager.PeerStatusChangeListener;
 import freenet.support.Base64;
@@ -1044,13 +1047,16 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 	* @param cb The callback to be called when the packet has been sent, or null.
 	* @param ctr A callback to tell how many bytes were used to send this message.
 	*/
-	public void sendAsync(Message msg, AsyncMessageCallback cb, ByteCounter ctr) throws NotConnectedException {
+	public MessageItem sendAsync(Message msg, AsyncMessageCallback cb, ByteCounter ctr) throws NotConnectedException {
 		if(ctr == null)
 			Logger.error(this, "Bytes not logged", new Exception("debug"));
 		if(logMINOR)
 			Logger.minor(this, "Sending async: " + msg + " : " + cb + " on " + this+" for "+node.getDarknetPortNumber());
-		if(!isConnected())
+		if(!isConnected()) {
+			if(cb != null)
+				cb.disconnected();
 			throw new NotConnectedException();
+		}
 		addToLocalNodeSentMessagesToStatistic(msg);
 		MessageItem item = new MessageItem(msg, cb == null ? null : new AsyncMessageCallback[]{cb}, ctr, this);
 		long now = System.currentTimeMillis();
@@ -1063,6 +1069,12 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 		// Otherwise we do not need to wake up the PacketSender
 		// It will wake up before the maximum coalescing delay (100ms) because
 		// it wakes up every 100ms *anyway*.
+		return item;
+	}
+	
+	public boolean unqueueMessage(MessageItem message) {
+		if(logMINOR) Logger.minor(this, "Unqueueing message on "+this+" : "+message);
+		return messageQueue.removeMessage(message);
 	}
 
 	public long getMessageQueueLengthBytes() {
@@ -1073,7 +1085,11 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 	 * Returns the number of milliseconds that it is estimated to take to transmit the currently queued packets.
 	 */
 	public long getProbableSendQueueTime() {
-		return (long)(getMessageQueueLengthBytes()/(getThrottle().getBandwidth()+1.0));
+		double bandwidth = (getThrottle().getBandwidth()+1.0);
+		if(shouldThrottle())
+			bandwidth = Math.min(bandwidth, node.getOutputBandwidthLimit() / 2);
+		long length = getMessageQueueLengthBytes();
+		return (long)(1000.0*length/bandwidth);
 	}
 
 	/**
@@ -1452,12 +1468,12 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 	static final int P_BURST_IF_DEFINITELY_FORWARDED = 20;
 
 	public boolean isBurstOnly() {
-		int status = outgoingMangler.getConnectivityStatus();
-		if(status == AddressTracker.DONT_KNOW) return false;
-		if(status == AddressTracker.DEFINITELY_NATED || status == AddressTracker.MAYBE_NATED) return false;
+		AddressTracker.Status status = outgoingMangler.getConnectivityStatus();
+		if(status == AddressTracker.Status.DONT_KNOW) return false;
+		if(status == AddressTracker.Status.DEFINITELY_NATED || status == AddressTracker.Status.MAYBE_NATED) return false;
 
 		// For now. FIXME try it with a lower probability when we're sure that the packet-deltas mechanisms works.
-		if(status == AddressTracker.MAYBE_PORT_FORWARDED) return false;
+		if(status == AddressTracker.Status.MAYBE_PORT_FORWARDED) return false;
 		long now = System.currentTimeMillis();
 		if(now - timeSetBurstNow > UPDATE_BURST_NOW_PERIOD) {
 			burstNow = (node.random.nextInt(P_BURST_IF_DEFINITELY_FORWARDED) == 0);
@@ -1847,7 +1863,8 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 
 		// Update sendHandshakeTime; don't send another handshake for a while.
 		// If unverified, "a while" determines the timeout; if not, it's just good practice to avoid a race below.
-		calcNextHandshake(true, true, false);
+		if(!(isSeed() && this instanceof SeedServerPeerNode))
+                    calcNextHandshake(true, true, false);
 		stopARKFetcher();
 		try {
 			// First, the new noderef
@@ -1865,7 +1882,10 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 		boolean routable = true;
 		boolean newer = false;
 		boolean older = false;
-		if(bogusNoderef) {
+		if(isSeed()) {
+                        routable = false;
+                        if(logMINOR) Logger.minor(this, "Not routing traffic to " + this + " it's for announcement.");
+                } else if(bogusNoderef) {
 			Logger.normal(this, "Not routing traffic to " + this + " - bogus noderef");
 			routable = false;
 			//FIXME: It looks like bogusNoderef will just be set to false a few lines later...
@@ -2118,7 +2138,7 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 	public long getBootID() {
 		return bootID;
 	}
-	private volatile Object arkFetcherSync = new Object();
+	private final Object arkFetcherSync = new Object();
 
 	void startARKFetcher() {
 		// FIXME any way to reduce locking here?
@@ -2388,7 +2408,7 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 		if(logMINOR)
 			Logger.minor(this, "Parsing: \n" + fs);
 		boolean changedAnything = innerProcessNewNoderef(fs, forARK, forDiffNodeRef) || forARK;
-		if(changedAnything)
+		if(changedAnything && !isSeed())
 			node.peers.writePeers();
 	}
 
@@ -3272,8 +3292,21 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 		if(peerNodeStatus!=oldPeerNodeStatus){
 			notifyPeerNodeStatusChangeListeners();
 		}
+		if(peerNodeStatus == PeerManager.PEER_NODE_STATUS_ROUTING_BACKED_OFF) {
+			long delta = localRoutingBackedOffUntil - now + 1;
+			if(delta > 0)
+				node.ticker.queueTimedJob(checkStatusAfterBackoff, "Update status for "+this, delta, true, true);
+		}
 		return peerNodeStatus;
 	}
+	
+	private final Runnable checkStatusAfterBackoff = new Runnable() {
+		
+		public void run() {
+			setPeerNodeStatus(System.currentTimeMillis(), true);
+		}
+		
+	};
 
 	public abstract boolean recordStatus();
 
@@ -3335,9 +3368,12 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 		return false;
 	}
 
-	protected synchronized void invalidate() {
-		isRoutable = false;
+	final void invalidate(long now) {
+		synchronized(this) {
+			isRoutable = false;
+		}
 		Logger.normal(this, "Invalidated " + this);
+		setPeerNodeStatus(System.currentTimeMillis());
 	}
 
 	public void maybeOnConnect() {
@@ -3459,28 +3495,10 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 		return Version.getArbitraryBuildNumber(getVersion(), -1);
 	}
 
-	private PacketThrottle _lastThrottle;
+	private final PacketThrottle _lastThrottle = new PacketThrottle(Node.PACKET_SIZE);
 
 	public PacketThrottle getThrottle() {
-		PacketThrottle newThrottle = null;
-		PacketThrottle prevThrottle = null;
-		synchronized(this) {
-			Peer peer = getPeer();
-			if(peer == null) {
-				// We haven't connected, prevent an NPE.
-				return null;
-			}
-			if(_lastThrottle != null) {
-				if(_lastThrottle.getPeer().equals(peer))
-					return _lastThrottle;
-			}
-			newThrottle = new PacketThrottle(peer, Node.PACKET_SIZE);
-			prevThrottle = _lastThrottle;
-			_lastThrottle = newThrottle;
-		}
-		if(prevThrottle != null)
-			prevThrottle.changedAddress(newThrottle);
-		return newThrottle;
+		return _lastThrottle;
 	}
 
 	/**
@@ -4099,21 +4117,10 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 		return resendBytesSent;
 	}
 
-	public void sendThrottledMessage(Message msg, int packetSize, ByteCounter ctr, int timeout, boolean blockForSend, AsyncMessageCallback callback) throws NotConnectedException, WaitedTooLongException, SyncSendWaitedTooLongException, PeerRestartedException {
+	public MessageItem sendThrottledMessage(Message msg, int packetSize, ByteCounter ctr, int timeout, boolean blockForSend, AsyncMessageCallback callback) throws NotConnectedException, WaitedTooLongException, SyncSendWaitedTooLongException, PeerRestartedException {
 		long deadline = System.currentTimeMillis() + timeout;
 		if(logMINOR) Logger.minor(this, "Sending throttled message with timeout "+timeout+" packet size "+packetSize+" to "+shortToString());
-		for(int i=0;i<100;i++) {
-			try {
-				getThrottle().sendThrottledMessage(msg, this, packetSize, ctr, deadline, blockForSend, callback);
-				return;
-			} catch (ThrottleDeprecatedException e) {
-				// Try with the new throttle. We don't need it, we'll get it from getThrottle().
-				continue;
-			}
-		}
-		Logger.error(this, "Peer constantly changes its IP address!!: "+shortToString());
-		forceDisconnect(true);
-		throw new NotConnectedException();
+		return getThrottle().sendThrottledMessage(msg, this, packetSize, ctr, deadline, blockForSend, callback);
 	}
 
 	/**
@@ -4266,17 +4273,11 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 				if(messageQueue.mustSendSize(minSize, maxSize))
 					mustSend = true;
 			}
+			
+		}
 
-			if(mustSend) {
-				int size = minSize;
-				size = messageQueue.addUrgentMessages(size, now, minSize, maxSize, messages);
-
-				// Now the not-so-urgent messages.
-				if(size >= 0) {
-					size = messageQueue.addNonUrgentMessages(size, now, minSize, maxSize, messages);
-				}
-			}
-
+		if(mustSend) {
+			messageQueue.addMessages(minSize, now, minSize, maxSize, messages);
 		}
 
 		if(messages.isEmpty() && keepalive) {
@@ -4333,20 +4334,20 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 
 	private HashMap<Key,RequestSender> turtlingTransfers = new HashMap<Key,RequestSender>();
 
-	public boolean registerTurtleTransfer(RequestSender sender) {
+	public String registerTurtleTransfer(RequestSender sender) {
 		Key key = sender.key;
 		synchronized(turtlingTransfers) {
 			if(turtlingTransfers.size() >= MAX_TURTLES_PER_PEER) {
 				Logger.warning(this, "Too many turtles for peer");
-				return false;
+				return "Too many turtles for peer";
 			}
 			if(turtlingTransfers.containsKey(key)) {
 				Logger.error(this, "Already fetching key from peer");
-				return false;
+				return "Already fetching key from peer";
 			}
 			turtlingTransfers.put(key, sender);
 			Logger.normal(this, "Turtles for "+getPeer()+" : "+turtlingTransfers.size());
-			return true;
+			return null;
 		}
 	}
 
@@ -4412,5 +4413,193 @@ public abstract class PeerNode implements PeerContext, USKRetrieverCallback {
 	public synchronized ConnectionType getAddedReason() {
 		return null;
 	}
+	
+	private final Object routedToLock = new Object();
+	
+	final LoadSender loadSender = new LoadSender();
+	
+	class LoadSender {
+	
+		public void onDisconnect() {
+			this.lastSentAllocationInput = 0;
+			this.lastSentAllocationOutput = 0;
+			this.timeLastSentAllocationNotice = -1;
+			this.lastFullStats = null;
+		}
 
+		private int lastSentAllocationInput;
+		private int lastSentAllocationOutput;
+		private long timeLastSentAllocationNotice;
+		private long countAllocationNotices;
+		private PeerLoadStats lastFullStats;
+		
+		public void onSetPeerAllocation(boolean input, int thisAllocation, int transfersPerInsert) {
+			boolean mustSend = false;
+			Message msg;
+			// FIXME review constants, how often are allocations actually sent?
+			long now = System.currentTimeMillis();
+			synchronized(this) {
+				int last = input ? lastSentAllocationInput : lastSentAllocationOutput;
+				if(now - timeLastSentAllocationNotice > 5000) {
+					if(logMINOR) Logger.minor(this, "Last sent allocation "+TimeUtil.formatTime(now - timeLastSentAllocationNotice));
+					mustSend = true;
+				} else {
+					if(thisAllocation > last * 1.05) {
+						if(logMINOR) Logger.minor(this, "Last allocation was "+last+" this is "+thisAllocation);
+						mustSend = true;
+					} else if(thisAllocation < last * 0.9) { 
+						if(logMINOR) Logger.minor(this, "Last allocation was "+last+" this is "+thisAllocation);
+						mustSend = true;
+					}
+				}
+				if(!mustSend) return;
+				msg = makeLoadStats(now, transfersPerInsert);
+			}
+			if(msg != null) {
+				if(logMINOR) Logger.minor(this, "Sending allocation notice to "+this+" allocation is "+thisAllocation+" for "+input);
+				try {
+					sendAsync(msg, null, node.nodeStats.allocationNoticesCounter);
+				} catch (NotConnectedException e) {
+					// Ignore
+				}
+			}
+			if(!mustSend) return;
+			timeLastSentAllocationNotice = now;
+			if(input)
+				lastSentAllocationInput = thisAllocation;
+			else
+				lastSentAllocationOutput = thisAllocation;
+			countAllocationNotices++;
+			if(logMINOR) Logger.minor(this, "Sending allocation notice to "+this+" allocation is "+thisAllocation+" for "+input);
+		}
+		
+		Message makeLoadStats(long now, int transfersPerInsert) {
+			PeerLoadStats stats = node.nodeStats.createPeerLoadStats(PeerNode.this, transfersPerInsert);
+			synchronized(this) {
+				lastSentAllocationInput = (int) stats.inputBandwidthPeerLimit;
+				lastSentAllocationOutput = (int) stats.outputBandwidthPeerLimit;
+				if(lastFullStats != null && lastFullStats.equals(stats)) return null;
+				lastFullStats = stats;
+				timeLastSentAllocationNotice = now;
+				countAllocationNotices++;
+			}
+			Message msg = DMT.createFNPPeerLoadStatus(stats);
+			return msg;
+		}
+	}
+	
+	public void onSetPeerAllocation(boolean input, int thisAllocation, int transfersPerInsert) {
+		loadSender.onSetPeerAllocation(input, thisAllocation, transfersPerInsert);
+	}
+
+	void removeUIDsFromMessageQueues(Long[] list) {
+		this.messageQueue.removeUIDsFromMessageQueues(list);
+	}
+	
+	public class IncomingLoadSummaryStats {
+		public IncomingLoadSummaryStats(int totalRequests,
+				double outputBandwidthPeerLimit,
+				double inputBandwidthPeerLimit,
+				double outputBandwidthTotalLimit,
+				double inputBandwidthTotalLimit,
+				double usedOutput,
+				double usedInput,
+				double othersUsedOutput,
+				double othersUsedInput) {
+			runningRequestsTotal = totalRequests;
+			peerCapacityOutputBytes = (int)outputBandwidthPeerLimit;
+			peerCapacityInputBytes = (int)inputBandwidthPeerLimit;
+			totalCapacityOutputBytes = (int)outputBandwidthTotalLimit;
+			totalCapacityInputBytes = (int)inputBandwidthTotalLimit;
+			usedCapacityOutputBytes = (int) usedOutput;
+			usedCapacityInputBytes = (int) usedInput;
+			othersUsedCapacityOutputBytes = (int) othersUsedOutput;
+			othersUsedCapacityInputBytes = (int) othersUsedInput;
+		}
+		
+		public final int runningRequestsTotal;
+		public final int peerCapacityOutputBytes;
+		public final int peerCapacityInputBytes;
+		public final int totalCapacityOutputBytes;
+		public final int totalCapacityInputBytes;
+		public final int usedCapacityOutputBytes;
+		public final int usedCapacityInputBytes;
+		public final int othersUsedCapacityOutputBytes;
+		public final int othersUsedCapacityInputBytes;
+	}
+	
+	public void reportLoadStatus(PeerLoadStats stat) {
+		outputLoadTracker().reportLoadStatus(stat);
+	}
+	
+	OutputLoadTracker outputLoadTracker() {
+		return outputLoadSender;
+	}
+	
+	final OutputLoadTracker outputLoadSender = new OutputLoadTracker();
+
+	/** Uses the information we receive on the load on the target node to determine whether
+	 * we can route to it and when we can route to it.
+	 */
+	class OutputLoadTracker {
+		
+		private PeerLoadStats lastIncomingLoadStats;
+		
+		public void reportLoadStatus(PeerLoadStats stat) {
+			if(logMINOR) Logger.minor(this, "Got load status : "+stat);
+			synchronized(routedToLock) {
+				lastIncomingLoadStats = stat;
+				//maybeNotifySlotWaiter();
+			}
+		}
+		
+		public synchronized PeerLoadStats getLastIncomingLoadStats(boolean realTime) {
+			return lastIncomingLoadStats;
+		}
+		
+		public IncomingLoadSummaryStats getIncomingLoadStats() {
+			PeerLoadStats loadStats;
+			synchronized(routedToLock) {
+				if(lastIncomingLoadStats == null) return null;
+				loadStats = lastIncomingLoadStats;
+			}
+			ByteCountersSnapshot byteCountersOutput = node.nodeStats.getByteCounters(false);
+			ByteCountersSnapshot byteCountersInput = node.nodeStats.getByteCounters(true);
+			RunningRequestsSnapshot runningRequests = node.nodeStats.getRunningRequestsTo(PeerNode.this, loadStats.averageTransfersOutPerInsert);
+			RunningRequestsSnapshot otherRunningRequests = loadStats.getOtherRunningRequests();
+			boolean ignoreLocalVsRemoteBandwidthLiability = node.nodeStats.ignoreLocalVsRemoteBandwidthLiability();
+			return new IncomingLoadSummaryStats(runningRequests.totalRequests(), 
+					loadStats.outputBandwidthPeerLimit, loadStats.inputBandwidthPeerLimit,
+					loadStats.outputBandwidthUpperLimit, loadStats.inputBandwidthUpperLimit,
+					runningRequests.calculate(ignoreLocalVsRemoteBandwidthLiability, byteCountersOutput, false),
+					runningRequests.calculate(ignoreLocalVsRemoteBandwidthLiability, byteCountersInput, true),
+					otherRunningRequests.calculate(ignoreLocalVsRemoteBandwidthLiability, byteCountersOutput, false),
+					otherRunningRequests.calculate(ignoreLocalVsRemoteBandwidthLiability, byteCountersInput, true));
+		}
+		
+		private void maybeNotifySlotWaiter() {
+			// FIXME do nothing for now
+			// Will be used later by new load management
+		}
+
+	}
+	
+	public void noLongerRoutingTo(UIDTag tag, boolean offeredKey) {
+		synchronized(routedToLock) {
+			if(offeredKey)
+				tag.removeFetchingOfferedKeyFrom(this);
+			else
+				tag.removeRoutingTo(this);
+			if(logMINOR) Logger.minor(this, "No longer routing to "+tag);
+			outputLoadTracker().maybeNotifySlotWaiter();
+		}
+	}
+	
+	public void postUnlock(UIDTag tag) {
+		synchronized(routedToLock) {
+			if(logMINOR) Logger.minor(this, "Unlocked "+tag);
+			outputLoadTracker().maybeNotifySlotWaiter();
+		}
+	}
+	
 }

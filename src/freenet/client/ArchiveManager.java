@@ -318,8 +318,9 @@ public class ArchiveManager {
 				context.mainExecutor.execute(new Runnable() {
 
 					public void run() {
+						InputStream is = null;
 						try {
-							Compressor.COMPRESSOR_TYPE.LZMA_NEW.decompress(data.getInputStream(), pos, data.size(), expectedSize);
+							Compressor.COMPRESSOR_TYPE.LZMA_NEW.decompress(is = data.getInputStream(), pos, data.size(), expectedSize);
 						} catch (IOException e) {
 							Logger.error(this, "Failed to decompress archive: "+e, e);
 							wrapper.set(e);
@@ -332,6 +333,7 @@ public class ArchiveManager {
 							} catch (IOException e) {
 								Logger.error(this, "Failed to close PipedOutputStream: "+e, e);
 							}
+							Closer.close(is);
 						}
 					}
 					
@@ -397,19 +399,23 @@ outerTAR:		while(true) {
 					Bucket output = tempBucketFactory.makeBucket(size);
 					OutputStream out = output.getOutputStream();
 
-					int readBytes;
-					while((readBytes = tarIS.read(buf)) > 0) {
-						out.write(buf, 0, readBytes);
-						readBytes += realLen;
-						if(readBytes > maxArchivedFileSize) {
-							addErrorElement(ctx, key, name, "File too big: "+maxArchivedFileSize+" greater than current archived file size limit "+maxArchivedFileSize, true);
-							out.close();
-							output.free();
-							continue outerTAR;
+					try {
+						int readBytes;
+						while((readBytes = tarIS.read(buf)) > 0) {
+							out.write(buf, 0, readBytes);
+							readBytes += realLen;
+							if(readBytes > maxArchivedFileSize) {
+								addErrorElement(ctx, key, name, "File too big: "+maxArchivedFileSize+" greater than current archived file size limit "+maxArchivedFileSize, true);
+								out.close();
+								out = null;
+								output.free();
+								continue outerTAR;
+							}
 						}
+						
+					} finally {
+						if(out != null) out.close();
 					}
-
-					out.close();
 					if(size <= maxArchivedFileSize) {
 						addStoreElement(ctx, key, name, output, gotElement, element, callback, container, context);
 						names.add(name);
@@ -472,20 +478,24 @@ outerZIP:		while(true) {
 					long realLen = 0;
 					Bucket output = tempBucketFactory.makeBucket(size);
 					OutputStream out = output.getOutputStream();
-
-					int readBytes;
-					while((readBytes = zis.read(buf)) > 0) {
-						out.write(buf, 0, readBytes);
-						readBytes += realLen;
-						if(readBytes > maxArchivedFileSize) {
-							addErrorElement(ctx, key, name, "File too big: "+maxArchivedFileSize+" greater than current archived file size limit "+maxArchivedFileSize, true);
-							out.close();
-							output.free();
-							continue outerZIP;
+					try {
+						
+						int readBytes;
+						while((readBytes = zis.read(buf)) > 0) {
+							out.write(buf, 0, readBytes);
+							readBytes += realLen;
+							if(readBytes > maxArchivedFileSize) {
+								addErrorElement(ctx, key, name, "File too big: "+maxArchivedFileSize+" greater than current archived file size limit "+maxArchivedFileSize, true);
+								out.close();
+								out = null;
+								output.free();
+								continue outerZIP;
+							}
 						}
+						
+					} finally {
+						if(out != null) out.close();
 					}
-
-					out.close();
 					if(size <= maxArchivedFileSize) {
 						addStoreElement(ctx, key, name, output, gotElement, element, callback, container, context);
 						names.add(name);
@@ -551,11 +561,7 @@ outerZIP:		while(true) {
 		Bucket bucket = null;
 		while(true) {
 			try {
-				bucket = tempBucketFactory.makeBucket(-1);
-				byte[] buf = metadata.writeToByteArray();
-				OutputStream os = bucket.getOutputStream();
-				os.write(buf);
-				os.close();
+				bucket = BucketTools.makeImmutableBucket(tempBucketFactory, metadata.writeToByteArray());
 				return addStoreElement(ctx, key, ".metadata", bucket, gotElement, element2, callback, container, context);
 			} catch (MetadataUnresolvedException e) {
 				try {
@@ -573,15 +579,17 @@ outerZIP:		while(true) {
 	private int resolve(MetadataUnresolvedException e, int x, Bucket bucket, ArchiveStoreContext ctx, FreenetURI key, MutableBoolean gotElement, String element2, ArchiveExtractCallback callback, ObjectContainer container, ClientContext context) throws IOException, ArchiveFailureException {
 		Metadata[] m = e.mustResolve;
 		for(int i=0;i<m.length;i++) {
+			byte[] buf;
 			try {
-				byte[] buf = m[i].writeToByteArray();
-				OutputStream os = bucket.getOutputStream();
-				os.write(buf);
-				os.close();
-				addStoreElement(ctx, key, ".metadata-"+(x++), bucket, gotElement, element2, callback, container, context);
+				buf = m[i].writeToByteArray();
 			} catch (MetadataUnresolvedException e1) {
 				x = resolve(e, x, bucket, ctx, key, gotElement, element2, callback, container, context);
+				continue;
 			}
+			OutputStream os = bucket.getOutputStream();
+			os.write(buf);
+			os.close();
+			addStoreElement(ctx, key, ".metadata-"+(x++), bucket, gotElement, element2, callback, container, context);
 		}
 		return x;
 	}

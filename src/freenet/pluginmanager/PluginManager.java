@@ -246,7 +246,7 @@ public class PluginManager {
 			toStart = null;
 		}
 	}
-	
+
 	public void stop(int maxWaitTime) {
 		// Stop loading plugins.
 		ArrayList<PluginProgress> matches = new ArrayList<PluginProgress>();
@@ -734,7 +734,7 @@ public class PluginManager {
 		if(lastSlash == -1)
 			/* Windows, maybe? */
 			lastSlash = pluginSpecification.lastIndexOf('\\');
-		File pluginDirectory = new File(node.getNodeDir(), "plugins");
+		File pluginDirectory = node.getPluginDir();
 		if(lastSlash == -1)
 			/* it's an official plugin! */
 			pluginFilename = pluginSpecification + ".jar";
@@ -1031,7 +1031,7 @@ public class PluginManager {
 		addOfficialPlugin("XMLLibrarian", false, 25, true, new FreenetURI("CHK@PzdgNIKIzYKet2x6rk2i9TMA8R3RTKf7~H7NBB-D1m4,8rfAK29Z8LkAcmwfVgF0RBGtTxaZZBmc7qcX5AoQUEo,AAIC--8/XMLLibrarian.jar"));
 		addOfficialPlugin("XMLSpider", false, 46, true, new FreenetURI("CHK@2FZYDhLSbhGQXeVfJNptV1~V3dNmS4zI59PpNaBlRqo,bvvqS-mMgeWHgLpEJzzYc18xY2urQSGYPmq4nmmJV6k,AAIC--8/XMLSpider.jar"));
 		addOfficialPlugin("Freereader", false, 4, true, new FreenetURI("CHK@4PuSjXk4Z0Hdu04JLhdPHLyOVLljj8qVbjRn3rHVzvg,bDGYnuYj67Q4uzroPBEWAYWRk26bPzf-iQ4~Uo3S7mg,AAIC--8/Freereader.jar"));
-		addOfficialPlugin("Library", false, 16, true, new FreenetURI("CHK@IrvhOEI4iFmVzGihshG2LxLdt6AX0Npz~fp9we0S5GA,lc8vD3w350kDwdSDKttKnGlxnKEGiy3U3lGiXDZrLls,AAIC--8/Library.jar"));
+		addOfficialPlugin("Library", false, 21, true, new FreenetURI("CHK@jkF54IAaH-pLmBS-evy5yTpHsYIKP4QkyAMoAVq4AoY,QQo5Hsq7pQJEptA7pISEteBQUDXO3dHmJxNN0g62UbY,AAIC--8/Library.jar"));
 		addOfficialPlugin("Spider", false, 47, false, new FreenetURI("CHK@avlS677YAH4q40rxTX9RiL87tNCer-KFkEH4ihf5Too,Rf8YkLYfNuZ4EshXgDjkMwE9dQJ8JuFHfhi6bu986mY,AAIC--8/Spider.jar"));
 		} catch (MalformedURLException e) {
 			throw new Error("Malformed hardcoded URL: "+e, e);
@@ -1097,7 +1097,7 @@ public class PluginManager {
 	};
 
 	public File getPluginFilename(String pluginName) {
-		File pluginDirectory = new File(node.getNodeDir(), "plugins");
+		File pluginDirectory = node.getPluginDir();
 		if((pluginDirectory.exists() && !pluginDirectory.isDirectory()) || (!pluginDirectory.exists() && !pluginDirectory.mkdirs()))
 			return null;
 		return new File(pluginDirectory, pluginName + ".jar");
@@ -1123,7 +1123,7 @@ public class PluginManager {
 		pdl.setSource(name);
 
 		/* check for plugin directory. */
-		File pluginDirectory = new File(node.getNodeDir(), "plugins");
+		File pluginDirectory = node.getPluginDir();
 		if((pluginDirectory.exists() && !pluginDirectory.isDirectory()) || (!pluginDirectory.exists() && !pluginDirectory.mkdirs())) {
 			Logger.error(this, "could not create plugin directory");
 			throw new PluginNotFoundException("could not create plugin directory");

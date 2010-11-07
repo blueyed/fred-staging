@@ -13,6 +13,8 @@ import freenet.io.comm.PeerParseException;
 import freenet.io.comm.PeerRestartedException;
 import freenet.io.comm.ReferenceSignatureVerificationException;
 import freenet.io.xfer.BlockTransmitter;
+import freenet.io.xfer.BlockTransmitter.BlockTransmitterCompletion;
+import freenet.io.xfer.BlockTransmitter.ReceiverAbortHandler;
 import freenet.io.xfer.PartiallyReceivedBlock;
 import freenet.io.xfer.WaitedTooLongException;
 import freenet.keys.CHKBlock;
@@ -22,6 +24,7 @@ import freenet.keys.NodeCHK;
 import freenet.keys.NodeSSK;
 import freenet.keys.SSKBlock;
 import freenet.node.OpennetManager.ConnectionType;
+import freenet.node.OpennetManager.NoderefCallback;
 import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.SimpleFieldSet;
@@ -64,6 +67,7 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 	private BlockTransmitter bt;
 	private final RequestTag tag;
 	KeyBlock passedInKeyBlock;
+	private boolean dontUnlock = false;
 
 	@Override
 	public String toString() {
@@ -105,56 +109,68 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 			Logger.normal(this, "requestor gone, could not start request handler wait");
 			node.removeTransferringRequestHandler(uid);
 			tag.handlerThrew(e);
-			node.unlockUID(uid, key instanceof NodeSSK, false, false, false, false, tag);
+			boolean dontUnlock;
+			synchronized(this) {
+				dontUnlock = this.dontUnlock;
+			}
+			if(!dontUnlock)
+				node.unlockUID(uid, key instanceof NodeSSK, false, false, false, false, tag);
 		} catch(Throwable t) {
 			Logger.error(this, "Caught " + t, t);
 			node.removeTransferringRequestHandler(uid);
 			tag.handlerThrew(t);
-			node.unlockUID(uid, key instanceof NodeSSK, false, false, false, false, tag);
+			boolean dontUnlock;
+			synchronized(this) {
+				dontUnlock = this.dontUnlock;
+			}
+			if(!dontUnlock)
+				node.unlockUID(uid, key instanceof NodeSSK, false, false, false, false, tag);
 		}
 	}
 	private Exception previousApplyByteCountCall;
 
 	private void applyByteCounts() {
-		if(disconnected) {
-			Logger.normal(this, "Not applying byte counts as request source disconnected during receive");
-			return;
-		}
-		if(appliedByteCounts) {
-			Logger.error(this, "applyByteCounts already called", new Exception("error"));
-			Logger.error(this, "first called here", previousApplyByteCountCall);
-			return;
-		}
-		previousApplyByteCountCall = new Exception("first call to applyByteCounts");
-		appliedByteCounts = true;
-		if((!finalTransferFailed) && rs != null && status != RequestSender.TIMED_OUT && status != RequestSender.GENERATED_REJECTED_OVERLOAD && status != RequestSender.INTERNAL_ERROR) {
-			int sent, rcvd;
-			synchronized(bytesSync) {
-				sent = sentBytes;
-				rcvd = receivedBytes;
+		synchronized(this) {
+			if(disconnected) {
+				Logger.normal(this, "Not applying byte counts as request source disconnected during receive");
+				return;
 			}
-			sent += rs.getTotalSentBytes();
-			rcvd += rs.getTotalReceivedBytes();
-			if(key instanceof NodeSSK) {
-				if(logMINOR)
-					Logger.minor(this, "Remote SSK fetch cost " + sent + '/' + rcvd + " bytes (" + status + ')');
-				node.nodeStats.remoteSskFetchBytesSentAverage.report(sent);
-				node.nodeStats.remoteSskFetchBytesReceivedAverage.report(rcvd);
-				if(status == RequestSender.SUCCESS) {
-					// Can report both parts, because we had both a Handler and a Sender
-					node.nodeStats.successfulSskFetchBytesSentAverage.report(sent);
-					node.nodeStats.successfulSskFetchBytesReceivedAverage.report(rcvd);
-				}
-			} else {
-				if(logMINOR)
-					Logger.minor(this, "Remote CHK fetch cost " + sent + '/' + rcvd + " bytes (" + status + ')');
-				node.nodeStats.remoteChkFetchBytesSentAverage.report(sent);
-				node.nodeStats.remoteChkFetchBytesReceivedAverage.report(rcvd);
-				if(status == RequestSender.SUCCESS) {
-					// Can report both parts, because we had both a Handler and a Sender
-					node.nodeStats.successfulChkFetchBytesSentAverage.report(sent);
-					node.nodeStats.successfulChkFetchBytesReceivedAverage.report(rcvd);
-				}
+			if(appliedByteCounts) {
+				Logger.error(this, "applyByteCounts already called", new Exception("error"));
+				Logger.error(this, "first called here", previousApplyByteCountCall);
+				return;
+			}
+			previousApplyByteCountCall = new Exception("first call to applyByteCounts");
+			appliedByteCounts = true;
+			if(!((!finalTransferFailed) && rs != null && status != RequestSender.TIMED_OUT && status != RequestSender.GENERATED_REJECTED_OVERLOAD && status != RequestSender.INTERNAL_ERROR))
+				return;
+		}
+		int sent, rcvd;
+		synchronized(bytesSync) {
+			sent = sentBytes;
+			rcvd = receivedBytes;
+		}
+		sent += rs.getTotalSentBytes();
+		rcvd += rs.getTotalReceivedBytes();
+		if(key instanceof NodeSSK) {
+			if(logMINOR)
+				Logger.minor(this, "Remote SSK fetch cost " + sent + '/' + rcvd + " bytes (" + status + ')');
+			node.nodeStats.remoteSskFetchBytesSentAverage.report(sent);
+			node.nodeStats.remoteSskFetchBytesReceivedAverage.report(rcvd);
+			if(status == RequestSender.SUCCESS) {
+				// Can report both parts, because we had both a Handler and a Sender
+				node.nodeStats.successfulSskFetchBytesSentAverage.report(sent);
+				node.nodeStats.successfulSskFetchBytesReceivedAverage.report(rcvd);
+			}
+		} else {
+			if(logMINOR)
+				Logger.minor(this, "Remote CHK fetch cost " + sent + '/' + rcvd + " bytes (" + status + ')');
+			node.nodeStats.remoteChkFetchBytesSentAverage.report(sent);
+			node.nodeStats.remoteChkFetchBytesReceivedAverage.report(rcvd);
+			if(status == RequestSender.SUCCESS) {
+				// Can report both parts, because we had both a Handler and a Sender
+				node.nodeStats.successfulChkFetchBytesSentAverage.report(sent);
+				node.nodeStats.successfulChkFetchBytesReceivedAverage.report(rcvd);
 			}
 		}
 	}
@@ -170,11 +186,10 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 		if(passedInKeyBlock != null) {
 			tag.setServedFromDatastore();
 			returnLocalData(passedInKeyBlock);
-			node.nodeStats.remoteRequest(key instanceof NodeSSK, true, true, htl, key.toNormalizedDouble());
 			passedInKeyBlock = null; // For GC
 			return;
 		} else
-			o = node.makeRequestSender(key, htl, uid, source, false, true, false, false, false);
+			o = node.makeRequestSender(key, htl, uid, tag, source, false, true, false, false, false);
 
 		if(o == null) { // ran out of htl?
 			Message dnf = DMT.createFNPDataNotFound(uid);
@@ -219,9 +234,39 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 
 			PartiallyReceivedBlock prb = rs.getPRB();
 			bt =
-				new BlockTransmitter(node.usm, source, uid, prb, this);
+				new BlockTransmitter(node.usm, node.getTicker(), source, uid, prb, this, new ReceiverAbortHandler() {
+
+					public boolean onAbort() {
+						if(node.hasKey(key, false, false)) return true; // Don't want it
+						if(node.failureTable.peersWantKey(key)) {
+							// This may indicate downstream is having trouble communicating with us.
+							Logger.error(this, "Downstream transfer successful but upstream transfer failed. Reassigning tag to self because want the data for ourselves on "+this);
+							node.reassignTagToSelf(tag);
+							rs.setMustUnlock();
+							synchronized(this) {
+								dontUnlock = true;
+							}
+							// FIXME move unlocking logic into UIDTag and always wait for both the handler and the sender.
+							return false; // Want it
+						}
+						return true;
+					}
+					
+				},
+				new BlockTransmitterCompletion() {
+
+					public void blockTransferFinished(boolean success) {
+						synchronized(RequestHandler.this) {
+							transferCompleted = true;
+							transferSuccess = success;
+							if(!waitingForTransferSuccess) return;
+						}
+						transferFinished(success);
+					}
+					
+				});
 			node.addTransferringRequestHandler(uid);
-			bt.sendAsync(node.executor);
+			bt.sendAsync();
 		} catch(NotConnectedException e) {
 			synchronized(this) {
 				disconnected = true;
@@ -231,6 +276,35 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 		}
 	}
 	
+	/** Has the transfer completed? */
+	boolean transferCompleted;
+	/** Did it succeed? */
+	boolean transferSuccess;
+	/** Are we waiting for the transfer to complete? */
+	boolean waitingForTransferSuccess;
+	
+	/** Once the transfer has finished and we have the final status code, either path fold
+	 * or just unregister.
+	 * @param success Whether the block transfer succeeded.
+	 */
+	protected void transferFinished(boolean success) {
+		if(success) {
+			status = rs.getStatus();
+			// Successful CHK transfer, maybe path fold
+			try {
+				finishOpennetChecked();
+			} catch (NotConnectedException e) {
+				// Not a big deal as the transfer succeeded.
+			}
+		} else {
+			finalTransferFailed = true;
+			status = rs.getStatus();
+			//for byte logging, since the block is the 'terminal' message.
+			applyByteCounts();
+			unregisterRequestHandlerWithNode();
+		}
+	}
+
 	public void onAbortDownstreamTransfers(int reason, String desc) {
 		if(bt == null) {
 			Logger.error(this, "No downstream transfer to abort! on "+this);
@@ -246,38 +320,26 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 		}
 	}
 
-	private void waitAndFinishCHKTransferOffThread() {
-		node.executor.execute(new Runnable() {
-
-			public void run() {
-				try {
-					waitAndFinishCHKTransfer();
-				} catch(NotConnectedException e) {
-					//for byte logging, since the block is the 'terminal' message.
-					applyByteCounts();
-					unregisterRequestHandlerWithNode();
-				}
-			}
-		}, "Finish CHK transfer for " + key + " for " + this);
-	}
-
-	private void waitAndFinishCHKTransfer() throws NotConnectedException {
-		if(logMINOR)
-			Logger.minor(this, "Waiting for CHK transfer to finish");
-		if(bt.getAsyncExitStatus()) {
-			status = rs.getStatus();
-			// Successful CHK transfer, maybe path fold
-			finishOpennetChecked();
-		} else {
-			finalTransferFailed = true;
-			status = rs.getStatus();
-			//for byte logging, since the block is the 'terminal' message.
-			applyByteCounts();
-			unregisterRequestHandlerWithNode();
+	/** Called when we have the final status and can thus complete as soon as the transfer
+	 * finishes.
+	 * @return True if we have finished the transfer as well and can therefore go to 
+	 * transferFinished(). 
+	 */
+	private synchronized boolean readyToFinishTransfer() {
+		if(waitingForTransferSuccess) {
+			Logger.error(this, "waitAndFinishCHKTransferOffThread called twice on "+this);
+			return false;
 		}
+		waitingForTransferSuccess = true;
+		if(!transferCompleted) return false; // Wait
+		return true;
 	}
 
-	public void onRequestSenderFinished(int status) {
+	/** If this is set, the transfer was turtled, the RequestSender took on responsibility
+	 * for unlocking the UID given, we should not unlock it. */
+	private long dontUnlockUID = -1;
+	
+	public void onRequestSenderFinished(int status, long grabbedUID) {
 		if(logMINOR) Logger.minor(this, "onRequestSenderFinished("+status+") on "+this);
 		long now = System.currentTimeMillis();
 
@@ -288,6 +350,8 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 			else
 				return;
 			tooLate = responseDeadline > 0 && now > responseDeadline;
+			if(grabbedUID != -1)
+				dontUnlockUID = grabbedUID;
 		}
 		
 		node.nodeStats.remoteRequest(key instanceof NodeSSK, status == RequestSender.SUCCESS, false, htl, key.toNormalizedDouble());
@@ -336,32 +400,14 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 				case RequestSender.SUCCESS:
 					if(key instanceof NodeSSK)
 						sendSSK(rs.getHeaders(), rs.getSSKData(), needsPubKey, (rs.getSSKBlock().getKey()).getPubKey());
-					else
-						if(bt == null && !disconnected) {
-							// Bug! This is impossible!
-							Logger.error(this, "Status is SUCCESS but we never started a transfer on " + uid);
-							// Obviously this node is confused, send a terminal reject to make sure the requestor is not waiting forever.
-							reject = DMT.createFNPRejectedOverload(uid, true);
-							sendTerminal(reject);
-						} else if(!disconnected)
-							waitAndFinishCHKTransferOffThread();
-						else
-							unregisterRequestHandlerWithNode();
+					else {
+						maybeCompleteTransfer();
+					}
 					return;
 				case RequestSender.VERIFY_FAILURE:
 				case RequestSender.GET_OFFER_VERIFY_FAILURE:
 					if(key instanceof NodeCHK) {
-						if(bt == null && !disconnected) {
-							// Bug! This is impossible!
-							Logger.error(this, "Status is VERIFY_FAILURE but we never started a transfer on " + uid);
-							// Obviously this node is confused, send a terminal reject to make sure the requestor is not waiting forever.
-							reject = DMT.createFNPRejectedOverload(uid, true);
-							sendTerminal(reject);
-						} else if(!disconnected)
-							//Verify fails after receive() is complete, so we might as well propagate it...
-							waitAndFinishCHKTransferOffThread();
-						else
-							unregisterRequestHandlerWithNode();
+						maybeCompleteTransfer();
 						return;
 					}
 					reject = DMT.createFNPRejectedOverload(uid, true);
@@ -370,16 +416,7 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 				case RequestSender.TRANSFER_FAILED:
 				case RequestSender.GET_OFFER_TRANSFER_FAILED:
 					if(key instanceof NodeCHK) {
-						if(bt == null && !disconnected) {
-							// Bug! This is impossible!
-							Logger.error(this, "Status is TRANSFER_FAILED but we never started a transfer on " + uid);
-							// Obviously this node is confused, send a terminal reject to make sure the requestor is not waiting forever.
-							reject = DMT.createFNPRejectedOverload(uid, true);
-							sendTerminal(reject);
-						} else if(!disconnected)
-							waitAndFinishCHKTransferOffThread();
-						else
-							unregisterRequestHandlerWithNode();
+						maybeCompleteTransfer();
 						return;
 					}
 					Logger.error(this, "finish(TRANSFER_FAILED) should not be called on SSK?!?!", new Exception("error"));
@@ -395,6 +432,39 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 			applyByteCounts();
 			unregisterRequestHandlerWithNode();
 		}
+	}
+
+	/** After we have reached a terminal status that might involve a transfer - success,
+	 * transfer fail or verify failure - check for disconnection, check that we actually
+	 * started the transfer, complete if we have already completed the transfer, or set
+	 * a flag so that we will complete when we do.
+	 * @throws NotConnectedException If we didn't start the transfer and were not 
+	 * connected to the source.
+	 */
+	private void maybeCompleteTransfer() throws NotConnectedException {
+		Message reject = null;
+		boolean disconn = false;
+		boolean xferFinished = false;
+		boolean xferSuccess = false;
+		synchronized(this) {
+			if(disconnected)
+				disconn = true;
+			else if(bt == null) {
+				// Bug! This is impossible!
+				Logger.error(this, "Status is "+status+" but we never started a transfer on " + uid);
+				// Obviously this node is confused, send a terminal reject to make sure the requestor is not waiting forever.
+				reject = DMT.createFNPRejectedOverload(uid, true);
+			} else {
+				xferFinished = readyToFinishTransfer();
+				xferSuccess = transferSuccess;
+			}
+		}
+		if(disconn)
+			unregisterRequestHandlerWithNode();
+		else if(disconn)
+			sendTerminal(reject);
+		else if(xferFinished)
+			transferFinished(xferSuccess);
 	}
 
 	private void sendSSK(byte[] headers, final byte[] data, boolean needsPubKey2, DSAPublicKey pubKey) throws NotConnectedException {
@@ -462,32 +532,52 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 		if(key instanceof NodeSSK) {
 			sendSSK(block.getRawHeaders(), block.getRawData(), needsPubKey, ((SSKBlock) block).getPubKey());
 			status = RequestSender.SUCCESS; // for byte logging
+			// Assume local SSK sending will succeed?
+			node.nodeStats.remoteRequest(true, true, true, htl, key.toNormalizedDouble());
 		} else if(block instanceof CHKBlock) {
 			Message df = DMT.createFNPCHKDataFound(uid, block.getRawHeaders());
 			PartiallyReceivedBlock prb =
 				new PartiallyReceivedBlock(Node.PACKETS_IN_BLOCK, Node.PACKET_SIZE, block.getRawData());
 			BlockTransmitter bt =
-				new BlockTransmitter(node.usm, source, uid, prb, this);
+				new BlockTransmitter(node.usm, node.getTicker(), source, uid, prb, this, BlockTransmitter.NEVER_CASCADE,
+						new BlockTransmitterCompletion() {
+
+					public void blockTransferFinished(boolean success) {
+						if(success) {
+							// for byte logging
+							status = RequestSender.SUCCESS;
+							// We've fetched it from our datastore, so there won't be a downstream noderef.
+							// But we want to send at least an FNPOpennetCompletedAck, otherwise the request source
+							// may have to timeout waiting for one. That will be the terminal message.
+							try {
+								finishOpennetNoRelay();
+							} catch (NotConnectedException e) {
+								Logger.normal(this, "requestor gone, could not start request handler wait");
+								node.removeTransferringRequestHandler(uid);
+								tag.handlerThrew(e);
+								node.unlockUID(uid, key instanceof NodeSSK, false, false, false, false, tag);
+							}
+						} else {
+							//also for byte logging, since the block is the 'terminal' message.
+							applyByteCounts();
+							unregisterRequestHandlerWithNode();
+						}
+						node.nodeStats.remoteRequest(false, success, true, htl, key.toNormalizedDouble());
+					}
+					
+				});
 			node.addTransferringRequestHandler(uid);
 			source.sendAsync(df, null, this);
-			if(bt.send(node.executor)) {
-				// for byte logging
-				status = RequestSender.SUCCESS;
-				// We've fetched it from our datastore, so there won't be a downstream noderef.
-				// But we want to send at least an FNPOpennetCompletedAck, otherwise the request source
-				// may have to timeout waiting for one. That will be the terminal message.
-				finishOpennetNoRelay();
-			} else {
-				//also for byte logging, since the block is the 'terminal' message.
-				applyByteCounts();
-				unregisterRequestHandlerWithNode();
-			}
+			bt.sendAsync();
 		} else
 			throw new IllegalStateException();
 	}
 
 	private void unregisterRequestHandlerWithNode() {
 		node.removeTransferringRequestHandler(uid);
+		synchronized(this) {
+			if(uid == dontUnlockUID) return;
+		}
 		node.unlockUID(uid, key instanceof NodeSSK, false, false, false, false, tag);
 	}
 
@@ -495,7 +585,7 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 	 * Sends the 'final' packet of a request in such a way that the thread can be freed (made non-runnable/exit)
 	 * and the byte counter will still be accurate.
 	 */
-	private void sendTerminal(Message msg) throws NotConnectedException {
+	private void sendTerminal(Message msg) {
 		if(logMINOR)
 			Logger.minor(this, "sendTerminal(" + msg + ")", new Exception("debug"));
 		if(sendTerminalCalled)
@@ -503,7 +593,11 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 		else
 			sendTerminalCalled = true;
 
-		source.sendAsync(msg, new TerminalMessageByteCountCollector(), this);
+		try {
+			source.sendAsync(msg, new TerminalMessageByteCountCollector(), this);
+		} catch (NotConnectedException e) {
+			// Will have called the callback, so caller doesn't need to worry about it.
+		}
 	}
 	boolean sendTerminalCalled = false;
 
@@ -556,19 +650,19 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 	 * Either send an ack, indicating we've finished and aren't interested in opennet, 
 	 * or wait for a noderef and relay it and wait for a response and relay that,
 	 * or send our own noderef and wait for a response and add that.
+	 * 
+	 * One way or another this method must call applyByteCounts; unregisterRequestHandlerWithNode.
+	 * This happens asynchronously via ackOpennet() if we are unable to send a noderef. It
+	 * happens explicitly otherwise.
 	 */
 	private void finishOpennetChecked() throws NotConnectedException {
 		OpennetManager om = node.getOpennet();
 		if(om != null &&
-			(node.passOpennetRefsThroughDarknet() || source.isOpennet()) &&
-			finishOpennetInner(om)) {
-			applyByteCounts();
-			unregisterRequestHandlerWithNode();
-			return;
+			(node.passOpennetRefsThroughDarknet() || source.isOpennet())) {
+			finishOpennetInner(om);
+		} else {
+			ackOpennet();
 		}
-
-		Message msg = DMT.createFNPOpennetCompletedAck(uid);
-		sendTerminal(msg);
 	}
 
 	/**
@@ -578,60 +672,86 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 	private void finishOpennetNoRelay() throws NotConnectedException {
 		OpennetManager om = node.getOpennet();
 
-		if(om != null && (source.isOpennet() || node.passOpennetRefsThroughDarknet()) &&
-			finishOpennetNoRelayInner(om)) {
-			applyByteCounts();
-			unregisterRequestHandlerWithNode();
-			return;
+		if(om != null && (source.isOpennet() || node.passOpennetRefsThroughDarknet())) {
+			finishOpennetNoRelayInner(om);
+		} else {
+			ackOpennet();
 		}
-
-		// Otherwise just ack it.
+	}
+	
+	/** Acknowledge the opennet path folding attempt without sending a reference. Once
+	 * the send completes (asynchronously), unlock everything. */
+	private void ackOpennet() {
 		Message msg = DMT.createFNPOpennetCompletedAck(uid);
 		sendTerminal(msg);
 	}
 
-	private boolean finishOpennetInner(OpennetManager om) {
+	/**
+	 * @param om
+	 * Completion: Will either call ackOpennet(), sending an ack downstream and then 
+	 * unlocking after this has been sent (asynchronously), or will unlock itself if we
+	 * sent a noderef (after we have handled the incoming noderef / ack / timeout). 
+	 */
+	private void finishOpennetInner(OpennetManager om) {
 		byte[] noderef = rs.waitForOpennetNoderef();
-		if(noderef == null)
-			return finishOpennetNoRelayInner(om);
-
-		if(node.random.nextInt(OpennetManager.RESET_PATH_FOLDING_PROB) == 0)
-			return finishOpennetNoRelayInner(om);
+		if(noderef == null || 
+				node.random.nextInt(OpennetManager.RESET_PATH_FOLDING_PROB) == 0) {
+			finishOpennetNoRelayInner(om);
+			return;
+		}
 
 		finishOpennetRelay(noderef, om);
-		return true;
 	}
 
 	/**
 	 * Send our noderef to the request source, wait for a reply, if we get one add it. Called when either the request
 	 * wasn't routed, or the node it was routed to didn't return a noderef.
-	 * @return True if success, or lost connection; false if we need to send an ack.
+	 * 
+	 * Completion: Will ack downstream if necessary (if we didn't send a noderef), and will
+	 * in any case call applyByteCounts(); unregisterRequestHandlerWithNode() asynchronously,
+	 * either after receiving the noderef, or after sending the ack.
 	 */
-	private boolean finishOpennetNoRelayInner(OpennetManager om) {
+	private void finishOpennetNoRelayInner(final OpennetManager om) {
 		if(logMINOR)
 			Logger.minor(this, "Finishing opennet: sending own reference");
-		if(!om.wantPeer(null, false, false, false, ConnectionType.PATH_FOLDING))
-			return false; // Don't want a reference
+		if(!om.wantPeer(null, false, false, false, ConnectionType.PATH_FOLDING)) {
+			ackOpennet();
+			return; // Don't want a reference
+		}
 
 		try {
 			om.sendOpennetRef(false, uid, source, om.crypto.myCompressedFullRef(), this);
 		} catch(NotConnectedException e) {
 			Logger.normal(this, "Can't send opennet ref because node disconnected on " + this);
 			// Oh well...
-			return true;
+			applyByteCounts();
+			unregisterRequestHandlerWithNode();
+			return;
 		}
 
 		// Wait for response
+		
+		om.waitForOpennetNoderef(true, source, uid, this, new NoderefCallback() {
 
-		byte[] noderef = om.waitForOpennetNoderef(true, source, uid, this);
+			public void gotNoderef(byte[] noderef) {
+				// We have sent a noderef. It is not appropriate for the caller to call ackOpennet():
+				// in all cases he should unlock.
+				finishOpennetNoRelayInner(om, noderef);
+				applyByteCounts();
+				unregisterRequestHandlerWithNode();
+			}
+			
+		});
+	}
 
+	private void finishOpennetNoRelayInner(OpennetManager om, byte[] noderef) {
 		if(noderef == null)
-			return false;
+			return;
 
 		SimpleFieldSet ref = om.validateNoderef(noderef, 0, noderef.length, source, false);
 
 		if(ref == null)
-			return false;
+			return;
 
 		try {
 			if(node.addNewOpennetNode(ref, ConnectionType.PATH_FOLDING) == null)
@@ -645,45 +765,61 @@ public class RequestHandler implements PrioRunnable, ByteCounter, RequestSender.
 		} catch(ReferenceSignatureVerificationException e) {
 			Logger.error(this, "Bad signature on opennet noderef for " + this + " from " + source + " : " + e, e);
 		}
-		return true;
 	}
 
 	/**
 	 * Called when the node we routed the request to returned a valid noderef, and we don't want it.
 	 * So we relay it downstream to somebody who does, and wait to relay the response back upstream.
+	 * 
+	 * Completion: Will call applyByteCounts(); unregisterRequestHandlerWithNode() asynchronously 
+	 * after this method returns.
 	 * @param noderef
 	 * @param om
 	 */
-	private void finishOpennetRelay(byte[] noderef, OpennetManager om) {
+	private void finishOpennetRelay(byte[] noderef, final OpennetManager om) {
 		if(logMINOR)
 			Logger.minor(this, "Finishing opennet: relaying reference from " + rs.successFrom());
 		// Send it back to the handler, then wait for the ConnectReply
-		PeerNode dataSource = rs.successFrom();
+		final PeerNode dataSource = rs.successFrom();
 
 		try {
 			om.sendOpennetRef(false, uid, source, noderef, this);
 		} catch(NotConnectedException e) {
 			// Lost contact with request source, nothing we can do
+			applyByteCounts();
+			unregisterRequestHandlerWithNode();
 			return;
 		}
 
 		// Now wait for reply from the request source.
+		
+		om.waitForOpennetNoderef(true, source, uid, this, new NoderefCallback() {
 
-		byte[] newNoderef = om.waitForOpennetNoderef(true, source, uid, this);
-
-		if(newNoderef == null)
-			// Already sent a ref, no way to tell upstream that we didn't receive one. :(
-			return;
-
-		// Send it forward to the data source, if it is valid.
-
-		if(om.validateNoderef(newNoderef, 0, newNoderef.length, source, false) != null)
-			try {
-				om.sendOpennetRef(true, uid, dataSource, newNoderef, this);
-			} catch(NotConnectedException e) {
-				// How sad
-				return;
+			public void gotNoderef(byte[] newNoderef) {
+				
+				if(newNoderef == null) {
+					// Already sent a ref, no way to tell upstream that we didn't receive one. :(
+				} else {
+					
+					// Send it forward to the data source, if it is valid.
+					
+					if(om.validateNoderef(newNoderef, 0, newNoderef.length, source, false) != null)
+						try {
+							om.sendOpennetRef(true, uid, dataSource, newNoderef, RequestHandler.this);
+						} catch(NotConnectedException e) {
+							// How sad
+						}
+				}
+				
+				// We have sent a noderef. It is not appropriate for the caller to call ackOpennet():
+				// in all cases he should unlock.
+				applyByteCounts();
+				unregisterRequestHandlerWithNode();
 			}
+			
+		});
+
+
 	}
 	private int sentBytes;
 	private int receivedBytes;
